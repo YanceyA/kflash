@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI Tooling
+.claude/
+.codex/
+CLAUDE.md
+AGENTS.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Windows
+nul
+
+# Local scratch
+.dev/

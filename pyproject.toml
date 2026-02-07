@@ -1,0 +1,8 @@
+[project]
+name = "kflash"
+description = "TUI tool for building and flashing Klipper and  Kalico firmware on MCUs"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "YanceyA" }]
+license = { text = "GPL-3.0-only" }
+urls = { Repository = "https://github.com/YanceyA/kflash" }
