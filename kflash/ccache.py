@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Optional
 
+from kflash import runner
 from kflash.models import CcacheStats
 
 
@@ -153,14 +153,14 @@ def configure_ccache() -> bool:
 
     for option, value in get_ccache_config_commands():
         try:
-            result = subprocess.run(
+            result = runner.run(
                 ["ccache", "--set-config", f"{option}={value}"],
-                capture_output=True,
                 timeout=10,
+                text=False,
             )
             if result.returncode != 0:
                 return False
-        except (subprocess.TimeoutExpired, OSError):
+        except OSError:
             return False
 
     return True
@@ -178,31 +178,21 @@ def get_ccache_stats() -> Optional[CcacheStats]:
         return None
 
     try:
-        result = subprocess.run(
-            ["ccache", "--print-stats"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        result = runner.run(["ccache", "--print-stats"], timeout=10)
         if result.returncode != 0:
             return None
 
         stats = _parse_ccache_stats(result.stdout)
         if stats and stats.total_calls == 0 and result.stdout.strip():
             # Fallback: some versions format stats differently
-            show = subprocess.run(
-                ["ccache", "--show-stats"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            show = runner.run(["ccache", "--show-stats"], timeout=10)
             if show.returncode == 0:
                 fallback = _parse_ccache_stats(show.stdout)
                 if fallback and fallback.total_calls > 0:
                     return fallback
 
         return stats
-    except (subprocess.TimeoutExpired, OSError):
+    except OSError:
         return None
 
 

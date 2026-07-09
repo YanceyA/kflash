@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import textwrap
 
-from .theme import get_theme
-
 
 def format_error(
     error_type: str,
@@ -16,7 +14,8 @@ def format_error(
     """Format an error message with optional context and recovery guidance.
 
     Produces plain ASCII output, wrapped to 80 columns per line.
-    No ANSI escape codes or Unicode box-drawing characters.
+    No ANSI escape codes or Unicode box-drawing characters -- styling (if any)
+    is the presenting sink's job, keeping this module UI-free.
 
     Args:
         error_type: Category of error (e.g., "Device not found", "Build failed")
@@ -27,8 +26,7 @@ def format_error(
     Returns:
         Multi-line formatted error string ready for display
     """
-    t = get_theme()
-    lines = [f"{t.error}[FAIL]{t.reset} {error_type}: {message}"]
+    lines = [f"[FAIL] {error_type}: {message}"]
 
     if context:
         # Build context prose from key-value pairs

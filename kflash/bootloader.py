@@ -15,11 +15,17 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+from . import runner
+from .decisions import (
+    ConfirmDecision,
+    DecisionProvider,
+    ManualBootloaderReadyDecision,
+)
+from .events import Emitter
 from .models import BootloaderResult, DeviceEntry
 from .safety import discover_python_path
 
@@ -80,15 +86,16 @@ def enter_bootloader(
     klipper_dir: str,
     katapult_dir: str = "~/katapult",
     stagger_delay: float = 2.0,
-    out: Any = None,
-    batch_mode: bool = False,
+    em: Optional[Emitter] = None,
+    decider: Optional[DecisionProvider] = None,
+    batch: bool = False,
 ) -> BootloaderResult:
     """Enter bootloader mode for a device using its configured method.
 
     Dispatches to the method-specific handler based on
     ``device_entry.bootloader_method``.  After the handler returns, applies
-    retry-once logic when re-enumeration fails and an output channel is
-    available.
+    retry-once logic when re-enumeration fails and this is an interactive
+    single-device run (``batch=False`` and a decision provider is available).
 
     Args:
         device_path: Current /dev/serial/by-id/ path to the device.
@@ -96,9 +103,11 @@ def enter_bootloader(
         klipper_dir: Path to the Klipper source directory.
         katapult_dir: Path to the Katapult source directory.
         stagger_delay: Seconds to wait after re-enumeration for USB to settle.
-        out: Optional output object with ``confirm()`` method for retry prompts.
-            When None (batch mode), no retry is offered.
-        batch_mode: Reserved for future use.
+        em: Event emitter (reserved; the callers emit the phase lines).
+        decider: Decision provider for the retry prompt and the manual
+            bootloader "press Enter" gate. Required on the flash path.
+        batch: Batch mode -- no retry is offered and the manual prompt uses the
+            batch instruction style. The decider is still required.
 
     Returns:
         BootloaderResult with success status, new device path, and timing.
@@ -125,11 +134,20 @@ def enter_bootloader(
         )
 
     # First attempt
-    result = handler(device_path, device_entry, klipper_dir, katapult_dir, stagger_delay, out)
+    result = handler(
+        device_path, device_entry, klipper_dir, katapult_dir, stagger_delay, decider, batch
+    )
 
-    # Retry logic: offer one retry when re-enumeration fails and out is available
-    if not result.success and out is not None and method != "none":
-        should_retry = out.confirm("Device not found. Try again?", default=True)
+    # Retry logic: offer one retry when re-enumeration fails on the interactive
+    # single-device path (batch never retries). Runs inside the stopped window.
+    if not result.success and not batch and decider is not None and method != "none":
+        should_retry = decider.confirm(
+            ConfirmDecision(
+                id="bootloader_retry",
+                message="Device not found. Try again?",
+                default=True,
+            )
+        )
         if should_retry:
             result = handler(
                 device_path,
@@ -137,7 +155,8 @@ def enter_bootloader(
                 klipper_dir,
                 katapult_dir,
                 stagger_delay,
-                out,
+                decider,
+                batch,
             )
 
     result.elapsed_seconds = time.monotonic() - start
@@ -145,11 +164,11 @@ def enter_bootloader(
 
 
 # ---------------------------------------------------------------------------
-# Helper: _get_klippy_env_python
+# Helper: get_klippy_env_python
 # ---------------------------------------------------------------------------
 
 
-def _get_klippy_env_python(klipper_dir: str) -> str:
+def get_klippy_env_python(klipper_dir: str) -> str:
     """Derive klippy-env Python interpreter path from klipper_dir.
 
     Uses the sibling-directory convention: if klipper_dir is ``~/klipper``,
@@ -205,7 +224,7 @@ def _get_moonraker_env_python(klipper_dir: str) -> str:
 
 def _poll_for_reenumeration(
     original_path: str,
-    serial_pattern: str,
+    serial_pattern: str | None,
     timeout: float = TIMEOUT_REENUMERATION,
     interval: float = POLL_INTERVAL,
     scan_fn: Any = None,
@@ -283,7 +302,8 @@ def _enter_none(
     klipper_dir: str,
     katapult_dir: str,
     stagger_delay: float,
-    out: Any,
+    decider: Optional[DecisionProvider],
+    batch: bool = False,
 ) -> BootloaderResult:
     """Handle bootloader_method='none': verify device exists, return path.
 
@@ -324,7 +344,8 @@ def _enter_usb(
     klipper_dir: str,
     katapult_dir: str,
     stagger_delay: float,
-    out: Any,
+    decider: Optional[DecisionProvider],
+    batch: bool = False,
 ) -> BootloaderResult:
     """Enter bootloader via Klipper's flash_usb.enter_bootloader().
 
@@ -343,7 +364,7 @@ def _enter_usb(
     Returns:
         BootloaderResult with new device path on success.
     """
-    python_path = _get_klippy_env_python(klipper_dir)
+    python_path = get_klippy_env_python(klipper_dir)
 
     # Build the script that imports and calls flash_usb.enter_bootloader
     klipper_path = Path(klipper_dir).expanduser().resolve()
@@ -355,21 +376,19 @@ def _enter_usb(
     )
 
     try:
-        subprocess.run(
+        usb_result = runner.run(
             [python_path, "-c", script],
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_BOOTLOADER_CMD,
-        )
-    except subprocess.TimeoutExpired:
-        return BootloaderResult(
-            success=False,
-            error_message=f"USB bootloader entry timed out ({TIMEOUT_BOOTLOADER_CMD}s)",
         )
     except OSError as exc:
         return BootloaderResult(
             success=False,
             error_message=f"Failed to run USB bootloader entry: {exc}",
+        )
+    if usb_result.timed_out:
+        return BootloaderResult(
+            success=False,
+            error_message=f"USB bootloader entry timed out ({TIMEOUT_BOOTLOADER_CMD}s)",
         )
 
     # Poll for device re-enumeration
@@ -407,7 +426,8 @@ def _enter_serial(
     klipper_dir: str,
     katapult_dir: str,
     stagger_delay: float,
-    out: Any,
+    decider: Optional[DecisionProvider],
+    batch: bool = False,
 ) -> BootloaderResult:
     """Enter bootloader via Katapult flashtool.py -r (serial reset).
 
@@ -439,21 +459,19 @@ def _enter_serial(
     python_path = _get_moonraker_env_python(klipper_dir)
 
     try:
-        subprocess.run(
+        serial_result = runner.run(
             [python_path, str(flashtool), "-r", "-d", device_path],
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_BOOTLOADER_CMD,
-        )
-    except subprocess.TimeoutExpired:
-        return BootloaderResult(
-            success=False,
-            error_message=f"Serial bootloader entry timed out ({TIMEOUT_BOOTLOADER_CMD}s)",
         )
     except OSError as exc:
         return BootloaderResult(
             success=False,
             error_message=f"Failed to run flashtool.py: {exc}",
+        )
+    if serial_result.timed_out:
+        return BootloaderResult(
+            success=False,
+            error_message=f"Serial bootloader entry timed out ({TIMEOUT_BOOTLOADER_CMD}s)",
         )
 
     # Poll for device re-enumeration
@@ -491,7 +509,8 @@ def _enter_manual(
     klipper_dir: str,
     katapult_dir: str,
     stagger_delay: float,
-    out: Any,
+    decider: Optional[DecisionProvider],
+    batch: bool = False,
 ) -> BootloaderResult:
     """Enter bootloader via manual user action (button press, jumper, etc.).
 
@@ -504,20 +523,25 @@ def _enter_manual(
         klipper_dir: Klipper source directory (unused).
         katapult_dir: Katapult source directory (unused).
         stagger_delay: Seconds to wait after re-enumeration.
-        out: Output object for user prompts.
+        decider: Decision provider for the "press Enter" gate. Required on the
+            flash path; a missing provider is a clean failure (no bare input).
+        batch: Whether this is a batch run (controls the prompt style via
+            ``ManualBootloaderReadyDecision.batch``).
 
     Returns:
         BootloaderResult with new device path on success.
     """
-    if out is not None:
-        out.info(
-            "Manual Bootloader",
-            f"Put '{device_entry.name}' into bootloader mode, then press Enter.",
+    if decider is None:
+        # A manual bootloader gate cannot be resolved without a decision
+        # provider; the composition root always supplies one on the flash path.
+        return BootloaderResult(
+            success=False,
+            error_message="Manual bootloader entry requires a decision provider",
         )
-
-    try:
-        input()
-    except (EOFError, KeyboardInterrupt):
+    ready = decider.manual_bootloader_ready(
+        ManualBootloaderReadyDecision(device_name=device_entry.name, batch=batch)
+    )
+    if not ready:
         return BootloaderResult(
             success=False,
             error_message="Manual bootloader entry cancelled",
@@ -563,7 +587,8 @@ def _enter_can(
     klipper_dir: str,
     katapult_dir: str,
     stagger_delay: float,
-    out: Any,
+    decider: Optional[DecisionProvider],
+    batch: bool = False,
 ) -> BootloaderResult:
     """Enter bootloader via Katapult flashtool.py -r over CAN bus.
 
@@ -597,21 +622,19 @@ def _enter_can(
     uuid = device_entry.canbus_uuid or ""
 
     try:
-        result = subprocess.run(
+        result = runner.run(
             ["python3", str(flashtool), "-i", interface, "-r", "-u", uuid],
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_BOOTLOADER_CMD,
-        )
-    except subprocess.TimeoutExpired:
-        return BootloaderResult(
-            success=False,
-            error_message=f"CAN bootloader entry timed out ({TIMEOUT_BOOTLOADER_CMD}s)",
         )
     except OSError as exc:
         return BootloaderResult(
             success=False,
             error_message=f"Failed to run flashtool.py: {exc}",
+        )
+    if result.timed_out:
+        return BootloaderResult(
+            success=False,
+            error_message=f"CAN bootloader entry timed out ({TIMEOUT_BOOTLOADER_CMD}s)",
         )
 
     if result.returncode != 0:

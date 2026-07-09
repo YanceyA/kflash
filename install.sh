@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 COMMAND_NAME="kflash"
 TARGET="${SCRIPT_DIR}/kflash.py"
+VENV_DIR="${KFLASH_VENV:-${SCRIPT_DIR}/.venv}"
 AUTO_YES=0
 DO_UNINSTALL=0
 
@@ -161,6 +162,10 @@ done
 if [[ "${DO_UNINSTALL}" -eq 1 ]]; then
     rm -f "${BIN_DIR}/${COMMAND_NAME}"
     success "Removed ${COMMAND_NAME}"
+    if [[ -d "${VENV_DIR}" ]]; then
+        echo "Virtualenv preserved at: ${VENV_DIR}"
+        echo "To remove it: rm -rf \"${VENV_DIR}\""
+    fi
     echo "Config data preserved at: ${XDG_CONFIG_HOME:-$HOME/.config}/kalico-flash/"
     echo "To remove all data: rm -rf \"${XDG_CONFIG_HOME:-$HOME/.config}/kalico-flash/\""
     exit 0
@@ -216,19 +221,48 @@ if ! command -v ccache >/dev/null 2>&1; then
 fi
 
 # Installation
+#
+# kflash now has a runtime dependency (textual), so it installs into a
+# dedicated venv — the same pattern Klipper installs use (klippy-env). The
+# install is editable, so a plain `git pull` takes effect immediately;
+# re-run install.sh after a pull that changes dependencies.
+
+# Create the venv (idempotent; --upgrade-deps not used: unavailable on 3.9)
+if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+    echo "Creating virtualenv at ${VENV_DIR}..."
+    if ! python3 -m venv "${VENV_DIR}"; then
+        warn "Error: could not create venv at ${VENV_DIR}"
+        warn "  On Pi OS / Debian: sudo apt install python3-venv"
+        exit 1
+    fi
+fi
+
+# Install kflash (editable) and its dependencies into the venv. Not --quiet:
+# the first install downloads textual + friends, which takes a few minutes on
+# a Pi, and a silent wait looks like a hang.
+echo "Installing kflash and its dependencies into the venv"
+echo "(first install downloads packages - this can take a few minutes on a Pi)..."
+if ! "${VENV_DIR}/bin/pip" install --progress-bar off --editable "${SCRIPT_DIR}"; then
+    warn "Error: pip install failed in ${VENV_DIR}"
+    warn "  Check network access, then re-run ./install.sh"
+    exit 1
+fi
 
 # Create bin directory (idempotent)
 mkdir -p "${BIN_DIR}"
 
-# Make kflash.py executable
+# Keep the legacy direct-run path working
 chmod +x "${TARGET}"
 
-# Create symlink (idempotent with -sfn)
-ln -sfn "${TARGET}" "${BIN_DIR}/${COMMAND_NAME}"
+# Symlink to the venv's console script (execs the venv Python; idempotent)
+ln -sfn "${VENV_DIR}/bin/${COMMAND_NAME}" "${BIN_DIR}/${COMMAND_NAME}"
 
 # PATH check and offer to fix
 if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
     warn "Warning: ${BIN_DIR} is not in your PATH"
+    # Intentionally single-quoted: this literal (with unexpanded $HOME/$PATH) is
+    # written verbatim into the user's shell profile so it re-evaluates at login.
+    # shellcheck disable=SC2016
     PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
     mapfile -t PROFILE_FILES < <(_path_profile_candidates)
 
@@ -237,9 +271,11 @@ if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
     else
         RC_FILE="$(_pick_path_rc_file "${PROFILE_FILES[@]}")"
         if prompt_yes_no "Add to ${RC_FILE}? [y/N] "; then
-            echo "" >> "${RC_FILE}"
-            echo "# Added by kalico-flash installer" >> "${RC_FILE}"
-            echo "${PATH_LINE}" >> "${RC_FILE}"
+            {
+                echo ""
+                echo "# Added by kalico-flash installer"
+                echo "${PATH_LINE}"
+            } >> "${RC_FILE}"
             success "Added to ${RC_FILE}"
             warn "Run 'source ${RC_FILE}' or open a new terminal"
         else
@@ -249,5 +285,5 @@ if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
 fi
 
 # Success message
-success "Installed ${COMMAND_NAME} -> ${TARGET}"
+success "Installed ${COMMAND_NAME} -> ${VENV_DIR}/bin/${COMMAND_NAME}"
 echo "Run 'kflash' to start"

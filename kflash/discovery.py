@@ -5,11 +5,12 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 from typing import Optional
 
+from . import runner
+from .events import Emitter, NullSink
 from .models import DiscoveredCanDevice, DiscoveredDevice
 
 SERIAL_BY_ID = "/dev/serial/by-id"
@@ -64,7 +65,7 @@ def match_device(pattern: str, devices: list) -> Optional[DiscoveredDevice]:
     return matches[0] if matches else None
 
 
-def _prefix_variants(pattern: str) -> list[str]:
+def prefix_variants(pattern: str) -> list[str]:
     """Return pattern variants with both Klipper_ and katapult_ prefixes.
 
     A pattern like ``usb-katapult_rp2040_30*`` returns both itself and
@@ -90,7 +91,7 @@ def match_devices(pattern: str, devices: list) -> list[DiscoveredDevice]:
     match ``usb-Klipper_*`` filenames and vice-versa so that devices are
     found regardless of which bootloader mode they booted into.
     """
-    variants = _prefix_variants(pattern)
+    variants = prefix_variants(pattern)
     return [
         device for device in devices if any(fnmatch.fnmatch(device.filename, v) for v in variants)
     ]
@@ -117,7 +118,7 @@ def find_registered_devices(devices: list, registry_devices: dict) -> tuple:
     for entry in registry_devices.values():
         if entry.serial_pattern is None:
             continue  # CAN devices matched separately (Phase 51)
-        variants = _prefix_variants(entry.serial_pattern)
+        variants = prefix_variants(entry.serial_pattern)
         for device in devices:
             if any(fnmatch.fnmatch(device.filename, v) for v in variants):
                 matched.append((entry, device))
@@ -253,17 +254,15 @@ def scan_can_devices(
         return []
 
     try:
-        result = subprocess.run(
+        result = runner.run(
             ["python3", str(flashtool), "-i", interface, "-q"],
-            capture_output=True,
-            text=True,
             timeout=timeout,
         )
-        if result.returncode != 0:
-            return []
-        return parse_can_query_output(result.stdout)
-    except (subprocess.TimeoutExpired, OSError):
+    except OSError:
         return []
+    if result.returncode != 0:
+        return []
+    return parse_can_query_output(result.stdout)
 
 
 def get_can_interface_qlen(interface: str) -> int | None:
@@ -332,10 +331,8 @@ def verify_can_device_after_flash(
 
     while time.monotonic() < deadline:
         try:
-            result = subprocess.run(
+            result = runner.run(
                 ["python3", str(flashtool), "-i", interface, "-q"],
-                capture_output=True,
-                text=True,
                 timeout=10,
             )
             if result.returncode == 0:
@@ -343,8 +340,86 @@ def verify_can_device_after_flash(
                 for dev in devices:
                     if dev.uuid == uuid and dev.application == "Klipper":
                         return True, None
-        except (subprocess.TimeoutExpired, OSError):
+        except OSError:
             pass
         time.sleep(poll_interval)
 
     return False, f"Device {uuid} did not return as 'Application: Klipper' within {timeout}s"
+
+
+def wait_for_device(
+    serial_pattern: str,
+    timeout: float = 30.0,
+    interval: float = 0.5,
+    em: Optional[Emitter] = None,
+) -> tuple[bool, str | None, str | None]:
+    """Poll for device to reappear after flash.
+
+    Emits inline ``progress`` liveness dots every 2 seconds through ``em``
+    (the operation screen renders them as ``Verifying...`` liveness). Checks
+    both device existence AND prefix (``Klipper_`` expected, ``katapult_``
+    means failure).
+
+    After a successful flash, the MCU reboots from bootloader to Klipper mode.
+    If we detect the device still in katapult mode, we continue polling to
+    allow time for the reboot to complete.
+
+    Args:
+        em: Event emitter for progress dots. Defaults to a silent no-op emitter.
+
+    Returns:
+        A 3-tuple ``(success, device_path, error_reason)``.
+    """
+    if em is None:
+        em = Emitter(NullSink())
+
+    start = time.monotonic()
+    last_dot_time = start
+    last_katapult_path = None  # Track if we've seen katapult device
+
+    em.progress("Verify", "Verifying")
+
+    while time.monotonic() - start < timeout:
+        now = time.monotonic()
+        if now - last_dot_time >= 2.0:
+            em.progress("Verify", ".")
+            last_dot_time = now
+
+        devices = scan_serial_devices()
+        found_katapult = False
+
+        for device in devices:
+            variants = prefix_variants(serial_pattern)
+            if any(fnmatch.fnmatch(device.filename, v) for v in variants):
+                filename_lower = device.filename.lower()
+                if filename_lower.startswith("usb-klipper_"):
+                    em.progress("Verify", "\n")
+                    return (True, device.path, None)
+                elif filename_lower.startswith("usb-katapult_"):
+                    # Device still in bootloader - continue polling to allow reboot
+                    found_katapult = True
+                    last_katapult_path = device.path
+                else:
+                    em.progress("Verify", "\n")
+                    return (
+                        False,
+                        device.path,
+                        f"Unexpected device prefix: {device.filename}",
+                    )
+
+        # If we saw katapult but it's now gone, device is rebooting - keep polling
+        if not found_katapult and last_katapult_path:
+            last_katapult_path = None  # Reset, device disappeared
+
+        time.sleep(interval)
+
+    em.progress("Verify", "\n")
+
+    # Timeout reached - provide helpful error based on what we observed
+    if last_katapult_path:
+        return (
+            False,
+            last_katapult_path,
+            "Device in bootloader mode (katapult)",
+        )
+    return (False, None, f"Timeout after {int(timeout)}s waiting for device")

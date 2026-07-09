@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import fields
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .errors import RegistryError
 from .models import BlockedDevice, DeviceEntry, GlobalConfig, RegistryData
@@ -15,6 +16,11 @@ from .models import BlockedDevice, DeviceEntry, GlobalConfig, RegistryData
 _UPDATABLE_DEVICE_FIELDS: frozenset[str] = frozenset(
     field.name for field in fields(DeviceEntry) if field.name != "key"
 )
+
+# Same rule as validation.validate_device_key. Enforced again here because
+# keys become config-cache directory names (shutil.rmtree/move targets), so
+# a hand-edited devices.json must not be able to smuggle in path separators.
+_DEVICE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 class Registry:
@@ -37,7 +43,13 @@ class Registry:
         global_config = GlobalConfig(
             klipper_dir=global_raw.get("klipper_dir", "~/klipper"),
             katapult_dir=global_raw.get("katapult_dir", "~/katapult"),
-            skip_menuconfig=global_raw.get("skip_menuconfig", False),
+            # Migration: the setting was `skip_menuconfig` (inverse polarity)
+            # before the menuconfig-gate rework; honor old files, prefer the
+            # new key when both are present. save() writes only the new key.
+            menuconfig_before_flash=global_raw.get(
+                "menuconfig_before_flash",
+                not global_raw.get("skip_menuconfig", False),
+            ),
             stagger_delay=global_raw.get("stagger_delay", 2.0),
             return_delay=global_raw.get("return_delay", 5.0),
             use_ccache=global_raw.get("use_ccache", False),
@@ -47,6 +59,11 @@ class Registry:
         )
         devices: dict[str, DeviceEntry] = {}
         for key, data in raw.get("devices", {}).items():
+            if not isinstance(key, str) or not _DEVICE_KEY_RE.match(key):
+                raise RegistryError(
+                    f"Invalid device key {key!r}: keys must start with a-z/0-9 "
+                    "and contain only a-z, 0-9, _ or -"
+                )
             if not isinstance(data, dict):
                 raise RegistryError(f"Device '{key}' entry must be a JSON object")
             try:
@@ -97,11 +114,11 @@ class Registry:
 
     def save(self, registry: RegistryData) -> None:
         """Save registry to disk atomically."""
-        data = {
+        data: dict[str, Any] = {
             "global": {
                 "klipper_dir": registry.global_config.klipper_dir,
                 "katapult_dir": registry.global_config.katapult_dir,
-                "skip_menuconfig": registry.global_config.skip_menuconfig,
+                "menuconfig_before_flash": registry.global_config.menuconfig_before_flash,
                 "stagger_delay": registry.global_config.stagger_delay,
                 "return_delay": registry.global_config.return_delay,
                 "use_ccache": registry.global_config.use_ccache,

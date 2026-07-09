@@ -1,0 +1,254 @@
+/* kflash Textual skin -- shared chrome for every screen.
+ *
+ * Pairs with kflash/ui/skin.py. Colours come from the kflash theme's custom
+ * $kf-* variables (defined in skin._KF_VARIABLES) so nothing is hard-coded.
+ * The look mirrors kflash/panels.py: rounded teal panels, embedded spaced-letter
+ * titles, flat tables, thin scrollbars, a muted footer hint line.
+ */
+
+Screen {
+    background: $kf-background;
+    color: $kf-text;
+    /* Thin, muted scrollbars -- barely there, never webby. */
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 1;
+    scrollbar-background: $kf-background;
+    scrollbar-background-hover: $kf-background;
+    scrollbar-background-active: $kf-background;
+    scrollbar-color: $kf-subtle;
+    scrollbar-color-hover: $kf-border;
+    scrollbar-color-active: $kf-header;
+}
+
+/* --- Panels: the round border + embedded spaced-letter title ------------- */
+
+.panel {
+    border: round $kf-border;
+    border-title-color: $kf-header;
+    border-title-style: bold;
+    border-title-align: left;
+    background: $kf-background;
+    /* Inner horizontal padding 2, matching render_panel(padding=2). */
+    padding: 0 2;
+    width: 1fr;
+    max-width: 80;
+    height: auto;
+    /* One blank line of rhythm between stacked panels (screen.py joins "\n\n"). */
+    margin: 0 0 1 0;
+}
+
+/* --- DataTable: flat, no zebra, calm reverse-video cursor ---------------- */
+
+DataTable {
+    background: $kf-background;
+    color: $kf-text;
+    height: auto;
+    max-height: 20;
+    scrollbar-size-vertical: 1;
+}
+
+DataTable > .datatable--header {
+    background: $kf-background;
+    color: $kf-label;
+    text-style: none;
+}
+
+/* No zebra striping: even and odd rows share the flat background. */
+DataTable > .datatable--even-row,
+DataTable > .datatable--odd-row {
+    background: $kf-background;
+    color: $kf-text;
+}
+
+/* Row cursor: reverse video in header colour (legacy theme.selected). */
+DataTable > .datatable--cursor {
+    background: $kf-header;
+    color: $kf-background;
+    text-style: none;
+}
+
+DataTable > .datatable--header-cursor {
+    background: $kf-header;
+    color: $kf-background;
+    text-style: bold;
+}
+
+/* No hover highlight, no bright focus outline. */
+DataTable > .datatable--hover {
+    background: $kf-background;
+    color: $kf-text;
+}
+
+DataTable:focus {
+    background: $kf-background;
+}
+
+/* --- Semantic status classes -------------------------------------------- */
+
+.status-ok {
+    color: $kf-green;
+}
+.status-warn {
+    color: $kf-yellow;
+}
+.status-caution {
+    color: $kf-orange;
+}
+.status-error {
+    color: $kf-red;
+}
+.phase-line {
+    color: $kf-border;
+}
+.disabled-row {
+    color: $kf-subtle;
+    text-style: dim;
+}
+.label-text {
+    color: $kf-label;
+}
+.subtle-text {
+    color: $kf-subtle;
+}
+
+/* --- Progress bar: palette colours, no gradient noise ------------------- */
+
+ProgressBar {
+    height: 1;
+}
+ProgressBar > Bar {
+    width: 1fr;
+}
+/* Flat track: the empty portion is the terminal background (invisible), so the
+ * bar reads as glyphs floating on the terminal like the rest of the UI -- no
+ * filled "web progress bar" block. */
+ProgressBar > Bar > .bar--bar {
+    color: $kf-header;
+    background: $kf-background;
+}
+ProgressBar > Bar > .bar--complete {
+    color: $kf-green;
+    background: $kf-background;
+}
+ProgressBar > PercentageStatus {
+    color: $kf-value;
+    text-style: none;
+}
+
+/* --- Footer hint line: one muted line, keys accented -------------------- */
+
+.hint-line {
+    height: 1;
+    width: 1fr;
+    max-width: 80;
+    background: $kf-background;
+    color: $kf-subtle;
+    padding: 0 1;
+}
+
+/* --- Confirm modal: centred, rounded, calm ------------------------------ */
+
+KConfirmScreen {
+    align: center middle;
+    /* Dim the backdrop rather than hide it -- keeps the screen behind visible. */
+    background: $kf-background 70%;
+}
+
+KConfirmScreen > .dialog {
+    width: 52;
+    max-width: 52;
+    height: auto;
+    background: $kf-surface;
+    padding: 1 2;
+    margin: 0;
+}
+
+KConfirmScreen .dialog-message {
+    color: $kf-text;
+    padding: 0 0 1 0;
+}
+
+/* --- Shared decision-dialog chrome (dialogs.py, R4) --------------------- */
+
+.kf-modal {
+    align: center middle;
+    /* Dim the backdrop rather than hide it -- the dashboard stays visible. */
+    background: $kf-background 70%;
+}
+
+.kf-modal > .dialog {
+    width: 64;
+    max-width: 64;
+    height: auto;
+    max-height: 90%;
+    background: $kf-surface;
+    padding: 1 2;
+    margin: 0;
+}
+
+.kf-modal .dialog-message {
+    color: $kf-text;
+    padding: 0 0 1 0;
+}
+
+.kf-modal .dialog-detail {
+    color: $kf-subtle;
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+/* OptionList inside a dialog: flat surface, calm reverse-video cursor. */
+.kf-modal OptionList {
+    background: $kf-surface;
+    color: $kf-text;
+    height: auto;
+    max-height: 16;
+    border: none;
+    padding: 0;
+    margin: 0 0 1 0;
+    scrollbar-size-vertical: 1;
+}
+
+.kf-modal OptionList:focus {
+    background: $kf-surface;
+}
+
+.kf-modal OptionList > .option-list--option-highlighted,
+.kf-modal OptionList:focus > .option-list--option-highlighted {
+    background: $kf-header;
+    color: $kf-background;
+    text-style: none;
+}
+
+.kf-modal OptionList > .option-list--option-hover {
+    background: $kf-surface;
+    color: $kf-text;
+}
+
+/* Single-line text input: flat, teal border, brighter on focus. */
+.kf-modal Input {
+    background: $kf-background;
+    color: $kf-value;
+    border: tall $kf-border;
+    margin: 0 0 1 0;
+    padding: 0 1;
+}
+
+.kf-modal Input:focus {
+    border: tall $kf-header;
+}
+
+/* --- Add-device + settings screens (screens/add_device.py, settings.py) - */
+
+AddDeviceScreen RichLog {
+    height: auto;
+    max-height: 16;
+    background: $kf-background;
+    color: $kf-text;
+}
+
+AddDeviceScreen .status-line,
+SettingsScreen .status-line {
+    height: auto;
+    color: $kf-text;
+}

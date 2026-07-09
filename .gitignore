@@ -1,4 +1,5 @@
 # Python
+.venv/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -29,3 +30,6 @@ nul
 
 # Local scratch
 .dev/
+
+# pytest-textual-snapshot report artifact
+snapshot_report.html

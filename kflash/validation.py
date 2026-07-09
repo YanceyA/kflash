@@ -150,6 +150,23 @@ FLASH_METHOD_TABLE: list[FlashMethodPair] = [
 ]
 
 
+# Human-readable labels for paired flash-method sub-fields. Shared by the
+# add-device wizard (flash.py) and the flash-config validator (preflight.py).
+SUB_FIELD_PROMPTS: dict[str, str] = {
+    "bootloader_baud": "Bootloader baud rate",
+    "uf2_mount_path": "UF2 mount path (e.g., /media/RPI-RP2)",
+    "sdcard_board": "SD card board name (from flash-sdcard.sh supported boards)",
+    "canbus_uuid": "CAN bus UUID (12-char hex)",
+    "canbus_interface": "CAN interface name (e.g., can0)",
+}
+
+# Default values applied (and echoed) for paired flash-method sub-fields when the
+# add-device wizard does not prompt. Shared by commands/device_add.py.
+SUB_FIELD_DEFAULTS: dict[str, object] = {
+    "bootloader_baud": 250000,
+}
+
+
 def find_flash_method_pair(
     bootloader_method: str | None,
     flash_command: str | None,
@@ -440,3 +457,53 @@ def validate_transport_fields(
     if not serial_pattern and not canbus_uuid:
         return False, "Device must have either serial_pattern or canbus_uuid"
     return True, ""
+
+
+def truncate_serial(path: str, max_width: int = 40) -> str:
+    """Truncate a serial path to fit within max_width visible characters.
+
+    If the path fits, return as-is. Otherwise keep the start and end
+    with ``...`` in the middle, preserving the ``-if00`` suffix when present.
+    """
+    if len(path) <= max_width:
+        return path
+    # Preserve suffix like -if00
+    suffix = ""
+    if path.endswith("-if00"):
+        suffix = "-if00"
+        body = path[: -len(suffix)]
+    else:
+        body = path
+    available = max_width - 3 - len(suffix)  # 3 chars for "..."
+    right = min(4, available // 3)
+    left = available - right
+    return body[:left] + "..." + body[-right:] + suffix
+
+
+# --- Sub-field validators for the paired flash-method picker ---
+# Wrappers that adapt string input from the add-device wizard to the typed
+# validators above. Shared by commands/device_add.py via SUB_FIELD_VALIDATORS.
+
+
+def _validate_bootloader_baud(value: str) -> tuple[bool, str]:
+    """Validate bootloader baud rate string."""
+    if not value.isdigit():
+        return (False, "Must be a number")
+    return validate_bootloader_baud(int(value))
+
+
+def _validate_canbus_uuid(value: str) -> tuple[bool, str]:
+    """Validate CAN bus UUID string."""
+    return validate_canbus_uuid(value)
+
+
+def _validate_canbus_interface(value: str) -> tuple[bool, str]:
+    """Validate CAN interface name string."""
+    return validate_can_interface(value)
+
+
+SUB_FIELD_VALIDATORS: dict[str, object] = {
+    "bootloader_baud": _validate_bootloader_baud,
+    "canbus_uuid": _validate_canbus_uuid,
+    "canbus_interface": _validate_canbus_interface,
+}

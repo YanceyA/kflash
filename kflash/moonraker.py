@@ -15,12 +15,12 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
+from . import runner
 from .models import PrintStatus
 
 # Connection settings (hardcoded per CONTEXT.md: no custom URL support)
@@ -179,11 +179,9 @@ def get_host_klipper_version(klipper_dir: str) -> Optional[str]:
     """
     klipper_path = Path(klipper_dir).expanduser()
     try:
-        result = subprocess.run(
+        result = runner.run(
             ["git", "describe", "--always", "--tags", "--long", "--dirty"],
             cwd=str(klipper_path),
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT,
         )
         if result.returncode == 0:
@@ -193,27 +191,21 @@ def get_host_klipper_version(klipper_dir: str) -> Optional[str]:
             # Fallback: synthesize vX-Y-gHASH when git describe returns tag-only
             tag = version if version.startswith("v") else None
             if not tag:
-                tag_result = subprocess.run(
+                tag_result = runner.run(
                     ["git", "describe", "--tags", "--abbrev=0"],
                     cwd=str(klipper_path),
-                    capture_output=True,
-                    text=True,
                     timeout=TIMEOUT,
                 )
                 if tag_result.returncode == 0:
                     tag = tag_result.stdout.strip()
-            count_result = subprocess.run(
+            count_result = runner.run(
                 ["git", "rev-list", "--count", "HEAD"],
                 cwd=str(klipper_path),
-                capture_output=True,
-                text=True,
                 timeout=TIMEOUT,
             )
-            hash_result = subprocess.run(
+            hash_result = runner.run(
                 ["git", "rev-parse", "--short", "HEAD"],
                 cwd=str(klipper_path),
-                capture_output=True,
-                text=True,
                 timeout=TIMEOUT,
             )
             if count_result.returncode == 0 and hash_result.returncode == 0:
@@ -222,7 +214,7 @@ def get_host_klipper_version(klipper_dir: str) -> Optional[str]:
                 if tag:
                     return f"{tag}-{count}-g{short_hash}"
                 return f"{count}-g{short_hash}"
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError):
         pass
     return None
 
@@ -313,6 +305,7 @@ def _get_mcu_version_fuzzy(
     Returns:
         Version string like "v0.12.0-45-g7ce409d" or None if unavailable.
     """
+    mcu_versions: Optional[dict[str, str]]
     if _mcu_versions is not None:
         mcu_versions = _mcu_versions
     else:
@@ -370,6 +363,7 @@ def get_mcu_version_for_device(
     Returns:
         Version string or None.
     """
+    versions: Optional[dict[str, str]]
     if _mcu_versions is not None:
         versions = _mcu_versions
     else:

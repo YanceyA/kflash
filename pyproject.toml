@@ -1,8 +1,93 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "kflash"
-description = "TUI tool for building and flashing Klipper and  Kalico firmware on MCUs"
+description = "TUI tool for building and flashing Klipper and Kalico firmware on MCUs"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "YanceyA" }]
 license = { text = "GPL-3.0-only" }
 urls = { Repository = "https://github.com/YanceyA/kflash" }
+# Version is single-sourced from kflash/__init__.py (__version__).
+dynamic = ["version"]
+# Python-floor decision (UI_BRAINSTORM §2.3): Textual 8.2.x publishes
+# requires-python ">=3.9,<4.0" (checked on PyPI 2026-07), so kflash KEEPS its
+# 3.9 floor and Pi OS Bullseye support. Revisit only if a future Textual major
+# drops 3.9. The upper bound tracks the tested major; bump deliberately.
+dependencies = ["textual>=8.2,<9"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-textual-snapshot",
+]
+
+[project.scripts]
+kflash = "kflash.flash:main"
+
+[tool.hatch.version]
+path = "kflash/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kflash"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+# The formatter is intentionally NOT adopted here: the codebase style is already
+# consistent and `ruff format` would produce an enormous, noisy diff on flash.py
+# (3,200+ lines) that is slated for a heavy Phase 2 refactor. We run lint-only
+# (including isort via the "I" rules) so import ordering and mechanical issues
+# are still enforced without a churny reformat. Revisit adopting the formatter
+# once flash.py is decomposed in Phase 2.
+
+[tool.ruff.lint]
+# Pragmatic starter ruleset. UP is pinned to py39 via target-version so it will
+# not "upgrade" syntax past what Python 3.9 supports.
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+    # --- py39 safety / intentional style ---
+    "UP007", # Union[X, Y] -> X | Y: kept as-is for py39 clarity and to avoid
+    "UP045", # Optional[X] -> X | None: mixing PEP 604 with the codebase's
+    #          existing Optional/Union style would be inconsistent churn across
+    #          modules slated for the Phase 2 refactor. target-version=py39
+    #          already blocks any runtime-unsafe upgrade.
+    "UP036", # "outdated version block": the `sys.version_info < (3, 9)` guard in
+    #          flash.py is an intentional defensive check so users on Python < 3.9
+    #          get a clean message instead of a SyntaxError. Its autofix would
+    #          delete the guard, which is a behavior change.
+    # --- flash.py and friends will be decomposed in Phase 2; refactor-y rules
+    #     that would force large rewrites now are disabled deliberately. ---
+    "SIM102", # nested if -> combined: hurts readability of guard chains here
+    "SIM105", # contextlib.suppress: try/except pass is clearer in these spots
+    "SIM108", # ternary rewrite: explicit if/else is intentional
+    "B007",   # unused loop variable: several intentional index loops
+]
+
+[tool.ruff.lint.per-file-ignores]
+# flash.py is the god-module tracked by H3/H4; ambiguity + long-body warts here
+# are deferred to the Phase 2 decomposition rather than papered over now.
+"kflash/flash.py" = ["E741"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_redundant_casts = true
+warn_unused_ignores = false
+no_implicit_optional = true
+# The codebase has pervasive type hints but was never checked. This config is
+# pragmatic: it verifies annotations without demanding a full typing pass.
+# Per-module relaxations below cover the two god-modules (flash.py, tui.py);
+# Phase 2 will decompose them and tighten typing.
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# tui.py remains the interactive UI god-module: its remaining errors are
+# Optional-narrowing and object-typed-dict issues tied to raw-terminal handling
+# that a later UI pass will fix structurally. Errors are suppressed for this
+# module ONLY -- a scoped per-module relaxation, NOT a package-wide ignore.
+# flash.py was decomposed in Phase 2 Step C (command bodies moved to
+# kflash/commands/) and now type-checks cleanly, so it is no longer listed.
+module = ["kflash.tui"]
+ignore_errors = true

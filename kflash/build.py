@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import multiprocessing
 import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Optional
 
+from . import runner
+from .ccache import configure_ccache, get_build_env, get_ccache_stats
 from .models import BuildResult, CcacheStats
 
 # Default timeout for build operations (5 minutes)
@@ -44,7 +45,7 @@ def run_menuconfig(klipper_dir: str, config_path: str) -> tuple[int, bool]:
 
     # Run menuconfig with inherited stdio (no PIPE) for ncurses TUI
     # User can navigate, edit, save with normal keyboard controls
-    result = subprocess.run(
+    returncode = runner.run_interactive(
         ["make", "menuconfig"],
         cwd=str(klipper_path),
         env=env,
@@ -57,7 +58,16 @@ def run_menuconfig(klipper_dir: str, config_path: str) -> tuple[int, bool]:
         if mtime_before is None or mtime_after > mtime_before:
             was_saved = True
 
-    return result.returncode, was_saved
+    return returncode, was_saved
+
+
+def _captured_tail(result: runner.CommandResult, quiet: bool) -> Optional[str]:
+    """Return the last 200 captured output lines (quiet builds only)."""
+    if not quiet:
+        return None
+    raw = (result.stdout or "") + (result.stderr or "")
+    lines = raw.splitlines()
+    return "\n".join(lines[-200:])
 
 
 def run_build(
@@ -80,8 +90,6 @@ def run_build(
     Returns:
         BuildResult with success status, firmware path/size, elapsed time
     """
-    from .ccache import configure_ccache, get_build_env, get_ccache_stats
-
     klipper_path = Path(klipper_dir).expanduser()
     start_time = time.monotonic()
 
@@ -92,78 +100,72 @@ def run_build(
         # Configure ccache on first use (idempotent)
         configure_ccache()
         pre_stats = get_ccache_stats()
-    # Run make clean with inherited stdio for streaming output
-    try:
-        clean_result = subprocess.run(
+    # Run make clean with inherited stdio (streaming) or captured (quiet)
+    if quiet:
+        clean_result = runner.run(
             ["make", "clean"],
             cwd=str(klipper_path),
             timeout=timeout,
-            capture_output=quiet,
             env=build_env,  # None uses default environment
         )
-    except subprocess.TimeoutExpired as exc:
-        error_output = None
-        if quiet:
-            raw = (exc.stdout or b"") + (exc.stderr or b"")
-            lines = raw.decode("utf-8", errors="replace").splitlines()
-            error_output = "\n".join(lines[-200:])
+    else:
+        clean_result = runner.run_streaming(
+            ["make", "clean"],
+            cwd=str(klipper_path),
+            timeout=timeout,
+            env=build_env,
+        )
+
+    if clean_result.timed_out:
         return BuildResult(
             success=False,
             elapsed_seconds=time.monotonic() - start_time,
             error_message=f"make clean timed out after {timeout}s",
-            error_output=error_output,
+            error_output=_captured_tail(clean_result, quiet),
         )
 
     if clean_result.returncode != 0:
         elapsed = time.monotonic() - start_time
-        error_output = None
-        if quiet:
-            raw = (clean_result.stdout or b"") + (clean_result.stderr or b"")
-            lines = raw.decode("utf-8", errors="replace").splitlines()
-            error_output = "\n".join(lines[-200:])
         return BuildResult(
             success=False,
             elapsed_seconds=elapsed,
             error_message=f"make clean failed with exit code {clean_result.returncode}",
-            error_output=error_output,
+            error_output=_captured_tail(clean_result, quiet),
         )
 
     # Run make -j with all available cores
     nproc = multiprocessing.cpu_count()
-    try:
-        build_result = subprocess.run(
+    if quiet:
+        build_result = runner.run(
             ["make", f"-j{nproc}"],
             cwd=str(klipper_path),
             timeout=timeout,
-            capture_output=quiet,
             env=build_env,  # None uses default environment
         )
-    except subprocess.TimeoutExpired as exc:
-        error_output = None
-        if quiet:
-            raw = (exc.stdout or b"") + (exc.stderr or b"")
-            lines = raw.decode("utf-8", errors="replace").splitlines()
-            error_output = "\n".join(lines[-200:])
+    else:
+        build_result = runner.run_streaming(
+            ["make", f"-j{nproc}"],
+            cwd=str(klipper_path),
+            timeout=timeout,
+            env=build_env,
+        )
+
+    if build_result.timed_out:
         return BuildResult(
             success=False,
             elapsed_seconds=time.monotonic() - start_time,
             error_message=f"Build timed out after {timeout}s",
-            error_output=error_output,
+            error_output=_captured_tail(build_result, quiet),
         )
 
     elapsed = time.monotonic() - start_time
 
     if build_result.returncode != 0:
-        error_output = None
-        if quiet:
-            raw = (build_result.stdout or b"") + (build_result.stderr or b"")
-            lines = raw.decode("utf-8", errors="replace").splitlines()
-            error_output = "\n".join(lines[-200:])
         return BuildResult(
             success=False,
             elapsed_seconds=elapsed,
             error_message=f"make failed with exit code {build_result.returncode}",
-            error_output=error_output,
+            error_output=_captured_tail(build_result, quiet),
         )
 
     # Check for firmware output (.bin preferred, .uf2 for RP2040)
@@ -195,40 +197,6 @@ def run_build(
         elapsed_seconds=elapsed,
         ccache_stats=ccache_stats,
     )
-
-
-class Builder:
-    """Convenience wrapper for build operations on a klipper directory."""
-
-    def __init__(self, klipper_dir: str):
-        """Initialize builder.
-
-        Args:
-            klipper_dir: Path to klipper source directory (supports ~)
-        """
-        self.klipper_dir = klipper_dir
-
-    def menuconfig(self, config_path: str) -> tuple[int, bool]:
-        """Run make menuconfig for the specified config file.
-
-        Args:
-            config_path: Path to .config file to use
-
-        Returns:
-            (return_code, was_saved) tuple
-        """
-        return run_menuconfig(self.klipper_dir, config_path)
-
-    def build(self, use_ccache: bool = False) -> BuildResult:
-        """Run make clean + make -j.
-
-        Args:
-            use_ccache: Enable ccache build acceleration if available
-
-        Returns:
-            BuildResult with success status and build info
-        """
-        return run_build(self.klipper_dir, use_ccache=use_ccache)
 
 
 def _delta_ccache_stats(before: CcacheStats, after: CcacheStats) -> CcacheStats:

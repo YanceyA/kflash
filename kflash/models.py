@@ -12,7 +12,10 @@ class GlobalConfig:
 
     klipper_dir: str = "~/klipper"
     katapult_dir: str = "~/katapult"
-    skip_menuconfig: bool = False
+    # Offer menuconfig as the gate into a single-device flash (default ON).
+    # Renamed from the legacy `skip_menuconfig` (inverse polarity); Registry
+    # migrates the old JSON key on load.
+    menuconfig_before_flash: bool = True
     stagger_delay: float = 2.0
     return_delay: float = 5.0
     use_ccache: bool = False  # Enable ccache build acceleration

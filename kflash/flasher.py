@@ -7,11 +7,6 @@ Public API (Phase 45+):
     flash_make()            -- flash via make flash
     flash_sdcard()          -- flash via flash-sdcard.sh script
     flash_uf2()             -- flash via UF2 mount copy
-
-DEPRECATED (legacy API, retained for backward compatibility):
-    flash_device()      -- original dual-method with fallback
-    _try_katapult_flash -- original captured-output katapult
-    _try_make_flash     -- original captured-output make flash
 """
 
 from __future__ import annotations
@@ -19,13 +14,15 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from .bootloader import _get_klippy_env_python
+from . import runner
+from .bootloader import get_klippy_env_python
+from .discovery import prefix_variants
 from .errors import DiscoveryError, format_error
+from .events import Emitter, NullSink
 from .models import DeviceEntry, FlashResult, GlobalConfig, KatapultCheckResult
 from .safety import discover_python_path
 
@@ -82,122 +79,6 @@ def verify_device_path(device_path: str) -> None:
         raise DiscoveryError(msg)
 
 
-# DEPRECATED: Legacy function retained for backward compatibility with flash.py
-def _try_katapult_flash(
-    device_path: str,
-    firmware_path: str,
-    katapult_dir: str,
-    timeout: int,
-) -> FlashResult:
-    """Attempt to flash using Katapult flashtool.py.
-
-    Args:
-        device_path: Path to the USB serial device.
-        firmware_path: Path to the firmware binary (klipper.bin).
-        katapult_dir: Path to the Katapult directory.
-        timeout: Seconds before timeout.
-
-    Returns:
-        FlashResult with success status and details.
-    """
-    start = time.monotonic()
-
-    # Build path to flashtool.py
-    flashtool = Path(katapult_dir).expanduser() / "scripts" / "flashtool.py"
-
-    if not flashtool.exists():
-        return FlashResult(
-            success=False,
-            method="katapult",
-            elapsed_seconds=time.monotonic() - start,
-            error_message=f"Katapult flashtool not found: {flashtool}",
-        )
-
-    try:
-        python_path = _get_python_path()
-        result = subprocess.run(
-            [python_path, str(flashtool), "-d", device_path, "-f", firmware_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        elapsed = time.monotonic() - start
-
-        if result.returncode == 0:
-            return FlashResult(
-                success=True,
-                method="katapult",
-                elapsed_seconds=elapsed,
-            )
-        else:
-            return FlashResult(
-                success=False,
-                method="katapult",
-                elapsed_seconds=elapsed,
-                error_message=result.stderr.strip() or result.stdout.strip(),
-            )
-
-    except subprocess.TimeoutExpired:
-        return FlashResult(
-            success=False,
-            method="katapult",
-            elapsed_seconds=timeout,
-            error_message=f"Flash timeout ({timeout}s) - device may need manual recovery",
-        )
-
-
-# DEPRECATED: Legacy function retained for backward compatibility with flash.py
-def _try_make_flash(
-    device_path: str,
-    klipper_dir: str,
-    timeout: int,
-) -> FlashResult:
-    """Attempt to flash using make flash.
-
-    Args:
-        device_path: Path to the USB serial device.
-        klipper_dir: Path to the Klipper directory.
-        timeout: Seconds before timeout.
-
-    Returns:
-        FlashResult with success status and details.
-    """
-    start = time.monotonic()
-    klipper_path = Path(klipper_dir).expanduser()
-
-    try:
-        result = subprocess.run(
-            ["make", f"FLASH_DEVICE={device_path}", "flash"],
-            cwd=str(klipper_path),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        elapsed = time.monotonic() - start
-
-        if result.returncode == 0:
-            return FlashResult(
-                success=True,
-                method="make_flash",
-                elapsed_seconds=elapsed,
-            )
-        else:
-            return FlashResult(
-                success=False,
-                method="make_flash",
-                elapsed_seconds=elapsed,
-                error_message=result.stderr.strip() or result.stdout.strip(),
-            )
-
-    except subprocess.TimeoutExpired:
-        return FlashResult(
-            success=False,
-            method="make_flash",
-            elapsed_seconds=timeout,
-            error_message=f"Flash timeout ({timeout}s) - device may need manual recovery",
-        )
-
-
 def _resolve_usb_sysfs_path(serial_path: str) -> str:
     """Resolve /dev/serial/by-id/ symlink to sysfs USB authorized file path."""
     real_dev = os.path.realpath(serial_path)
@@ -216,14 +97,12 @@ def _resolve_usb_sysfs_path(serial_path: str) -> str:
 def _usb_sysfs_reset(authorized_path: str) -> None:
     """Toggle USB device authorized flag to force re-enumeration."""
     for value in ("0", "1"):
-        result = subprocess.run(
+        result = runner.run(
             ["sudo", "-n", "tee", authorized_path],
             input=value,
-            capture_output=True,
-            text=True,
             timeout=10,
         )
-        if result.returncode != 0:
+        if result.timed_out or result.returncode != 0:
             raise DiscoveryError(
                 f"Failed to write '{value}' to {authorized_path}: {result.stderr.strip()}"
             )
@@ -240,9 +119,7 @@ def _poll_for_serial_device(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            from .discovery import _prefix_variants
-
-            variants = _prefix_variants(pattern)
+            variants = prefix_variants(pattern)
             for name in os.listdir(serial_dir):
                 if any(fnmatch.fnmatch(name, v) for v in variants):
                     return os.path.join(serial_dir, name)
@@ -312,28 +189,26 @@ def check_katapult(
         log("Entering bootloader mode...")
     try:
         python_path = _get_python_path()
-        result = subprocess.run(
+        result = runner.run(
             [python_path, str(flashtool), "-r", "-d", device_path],
-            capture_output=True,
-            text=True,
             timeout=BOOTLOADER_ENTRY_TIMEOUT,
-        )
-        if result.returncode != 0:
-            return KatapultCheckResult(
-                has_katapult=None,
-                error_message=result.stderr.strip() or result.stdout.strip(),
-                elapsed_seconds=time.monotonic() - start,
-            )
-    except subprocess.TimeoutExpired:
-        return KatapultCheckResult(
-            has_katapult=None,
-            error_message=f"flashtool.py -r timed out ({BOOTLOADER_ENTRY_TIMEOUT}s)",
-            elapsed_seconds=time.monotonic() - start,
         )
     except OSError as exc:
         return KatapultCheckResult(
             has_katapult=None,
             error_message=f"Failed to run flashtool.py: {exc}",
+            elapsed_seconds=time.monotonic() - start,
+        )
+    if result.timed_out:
+        return KatapultCheckResult(
+            has_katapult=None,
+            error_message=f"flashtool.py -r timed out ({BOOTLOADER_ENTRY_TIMEOUT}s)",
+            elapsed_seconds=time.monotonic() - start,
+        )
+    if result.returncode != 0:
+        return KatapultCheckResult(
+            has_katapult=None,
+            error_message=result.stderr.strip() or result.stdout.strip(),
             elapsed_seconds=time.monotonic() - start,
         )
 
@@ -374,82 +249,6 @@ def check_katapult(
         error_message="Device did not recover after USB reset",
         elapsed_seconds=time.monotonic() - start,
     )
-
-
-# DEPRECATED: Legacy function retained for backward compatibility with flash.py
-def flash_device(
-    device_path: str,
-    firmware_path: str,
-    katapult_dir: str,
-    klipper_dir: str,
-    timeout: int = TIMEOUT_FLASH,
-    preferred_method: str = "katapult",
-    allow_fallback: bool = True,
-    log: Optional[Callable[[str], None]] = None,
-) -> FlashResult:
-    """Flash firmware to device using Katapult or make flash.
-
-    Tries Katapult flashtool.py first. If that fails, falls back to
-    make flash automatically.
-
-    Args:
-        device_path: Path to the USB serial device.
-        firmware_path: Path to the firmware binary (klipper.bin).
-        katapult_dir: Path to the Katapult directory.
-        klipper_dir: Path to the Klipper directory.
-        timeout: Seconds per flash attempt (applies to each method).
-        preferred_method: "katapult" or "make_flash" (default: "katapult").
-        allow_fallback: If True, attempt the other method on failure.
-        log: Optional callback for progress messages.
-
-    Returns:
-        FlashResult with success status, method used, and timing.
-    """
-    start = time.monotonic()
-
-    method = (preferred_method or "katapult").strip().lower()
-    if method not in ("katapult", "make_flash"):
-        return FlashResult(
-            success=False,
-            method=method,
-            elapsed_seconds=0.0,
-            error_message=f"Unknown flash method: {method}",
-        )
-
-    methods = [method]
-    if allow_fallback:
-        methods.append("make_flash" if method == "katapult" else "katapult")
-
-    last_result: Optional[FlashResult] = None
-    for current in methods:
-        if current == "katapult":
-            result = _try_katapult_flash(device_path, firmware_path, katapult_dir, timeout)
-        else:
-            result = _try_make_flash(device_path, klipper_dir, timeout)
-
-        last_result = result
-        if result.success:
-            return result
-
-        # If no fallback, return immediately
-        if not allow_fallback or current == methods[-1]:
-            break
-
-        if log is not None:
-            log(f"{current} failed: {result.error_message}")
-            log("Trying fallback method...")
-
-    # If all methods failed, return last result with total elapsed time
-    if last_result is None:
-        return FlashResult(
-            success=False,
-            method=method,
-            elapsed_seconds=time.monotonic() - start,
-            error_message="No flash methods attempted",
-        )
-
-    last_result.elapsed_seconds = time.monotonic() - start
-    return last_result
 
 
 # ---------------------------------------------------------------------------
@@ -493,33 +292,10 @@ def flash_katapult(
         )
 
     try:
-        python_path = _get_klippy_env_python(klipper_dir)
-        result = subprocess.run(
+        python_path = get_klippy_env_python(klipper_dir)
+        result = runner.run_streaming(
             [python_path, str(flashtool), "-d", device_path, "-f", firmware_path],
             timeout=timeout,
-        )
-        elapsed = time.monotonic() - start
-
-        if result.returncode == 0:
-            return FlashResult(
-                success=True,
-                method="katapult",
-                elapsed_seconds=elapsed,
-            )
-        else:
-            return FlashResult(
-                success=False,
-                method="katapult",
-                elapsed_seconds=elapsed,
-                error_message="flashtool.py returned non-zero exit code",
-            )
-
-    except subprocess.TimeoutExpired:
-        return FlashResult(
-            success=False,
-            method="katapult",
-            elapsed_seconds=timeout,
-            error_message=f"Flash timeout ({timeout}s)",
         )
     except OSError as exc:
         return FlashResult(
@@ -528,6 +304,28 @@ def flash_katapult(
             elapsed_seconds=time.monotonic() - start,
             error_message=f"Failed to run flashtool.py: {exc}",
         )
+
+    if result.timed_out:
+        return FlashResult(
+            success=False,
+            method="katapult",
+            elapsed_seconds=timeout,
+            error_message=f"Flash timeout ({timeout}s)",
+        )
+
+    elapsed = time.monotonic() - start
+    if result.returncode == 0:
+        return FlashResult(
+            success=True,
+            method="katapult",
+            elapsed_seconds=elapsed,
+        )
+    return FlashResult(
+        success=False,
+        method="katapult",
+        elapsed_seconds=elapsed,
+        error_message="flashtool.py returned non-zero exit code",
+    )
 
 
 def flash_make(
@@ -552,33 +350,10 @@ def flash_make(
     klipper_path = Path(klipper_dir).expanduser()
 
     try:
-        result = subprocess.run(
+        result = runner.run_streaming(
             ["make", f"FLASH_DEVICE={device_path}", "flash"],
             cwd=str(klipper_path),
             timeout=timeout,
-        )
-        elapsed = time.monotonic() - start
-
-        if result.returncode == 0:
-            return FlashResult(
-                success=True,
-                method="make_flash",
-                elapsed_seconds=elapsed,
-            )
-        else:
-            return FlashResult(
-                success=False,
-                method="make_flash",
-                elapsed_seconds=elapsed,
-                error_message="make flash returned non-zero exit code",
-            )
-
-    except subprocess.TimeoutExpired:
-        return FlashResult(
-            success=False,
-            method="make_flash",
-            elapsed_seconds=timeout,
-            error_message=f"Flash timeout ({timeout}s)",
         )
     except OSError as exc:
         return FlashResult(
@@ -587,6 +362,28 @@ def flash_make(
             elapsed_seconds=time.monotonic() - start,
             error_message=f"Failed to run make flash: {exc}",
         )
+
+    if result.timed_out:
+        return FlashResult(
+            success=False,
+            method="make_flash",
+            elapsed_seconds=timeout,
+            error_message=f"Flash timeout ({timeout}s)",
+        )
+
+    elapsed = time.monotonic() - start
+    if result.returncode == 0:
+        return FlashResult(
+            success=True,
+            method="make_flash",
+            elapsed_seconds=elapsed,
+        )
+    return FlashResult(
+        success=False,
+        method="make_flash",
+        elapsed_seconds=elapsed,
+        error_message="make flash returned non-zero exit code",
+    )
 
 
 def flash_sdcard(
@@ -635,34 +432,10 @@ def flash_sdcard(
         )
 
     try:
-        result = subprocess.run(
+        result = runner.run_streaming(
             [str(script), device_path, board_name],
             cwd=str(klipper_path),
             timeout=timeout,
-        )
-        elapsed = time.monotonic() - start
-
-        if result.returncode == 0:
-            return FlashResult(
-                success=True,
-                method="flash_sdcard",
-                elapsed_seconds=elapsed,
-            )
-        else:
-            err_msg = f"flash_sdcard failed for board {board_name}: non-zero exit code"
-            return FlashResult(
-                success=False,
-                method="flash_sdcard",
-                elapsed_seconds=elapsed,
-                error_message=err_msg,
-            )
-
-    except subprocess.TimeoutExpired:
-        return FlashResult(
-            success=False,
-            method="flash_sdcard",
-            elapsed_seconds=timeout,
-            error_message=f"flash_sdcard failed for board {board_name}: timeout ({timeout}s)",
         )
     except OSError as exc:
         return FlashResult(
@@ -671,6 +444,29 @@ def flash_sdcard(
             elapsed_seconds=time.monotonic() - start,
             error_message=f"flash_sdcard failed for board {board_name}: {exc}",
         )
+
+    if result.timed_out:
+        return FlashResult(
+            success=False,
+            method="flash_sdcard",
+            elapsed_seconds=timeout,
+            error_message=f"flash_sdcard failed for board {board_name}: timeout ({timeout}s)",
+        )
+
+    elapsed = time.monotonic() - start
+    if result.returncode == 0:
+        return FlashResult(
+            success=True,
+            method="flash_sdcard",
+            elapsed_seconds=elapsed,
+        )
+    err_msg = f"flash_sdcard failed for board {board_name}: non-zero exit code"
+    return FlashResult(
+        success=False,
+        method="flash_sdcard",
+        elapsed_seconds=elapsed,
+        error_message=err_msg,
+    )
 
 
 def _find_uf2_mount(uf2_mount_path: Optional[str], username: str) -> Optional[str]:
@@ -714,6 +510,7 @@ def flash_uf2(
     firmware_path: str,
     mount_path: Optional[str],
     timeout: int = 15,
+    em: Optional[Emitter] = None,
 ) -> FlashResult:
     """Flash firmware by copying UF2 file to mass storage mount.
 
@@ -724,10 +521,14 @@ def flash_uf2(
         firmware_path: Path to the firmware file (klipper.uf2).
         mount_path: Explicit mount path from device config (may be None for auto-detect).
         timeout: Seconds to poll for mount point (default 15).
+        em: Event emitter for the "Copied" status line. Defaults to a silent
+            no-op emitter.
 
     Returns:
         FlashResult with success status and method='uf2_mount'.
     """
+    if em is None:
+        em = Emitter(NullSink())
     import getpass
     import shutil
 
@@ -765,7 +566,7 @@ def flash_uf2(
         filename = os.path.basename(firmware_path)
         dest_path = os.path.join(uf2_mount, filename)
         shutil.copy(firmware_path, dest_path)
-        print(f"Copied {filename} to {uf2_mount}")
+        em.info("Flash", f"Copied {filename} to {uf2_mount}")
         elapsed = time.monotonic() - start
 
         return FlashResult(
@@ -824,7 +625,7 @@ def flash_katapult_can(
     last_error = ""
     for attempt in range(1, max_retries + 1):
         try:
-            result = subprocess.run(
+            result = runner.run_streaming(
                 [
                     "python3",
                     str(flashtool),
@@ -837,22 +638,20 @@ def flash_katapult_can(
                 ],
                 timeout=timeout,
             )
-
-            if result.returncode == 0:
-                return FlashResult(
-                    success=True,
-                    method="katapult_can",
-                    elapsed_seconds=time.monotonic() - start,
-                )
-
-            last_error = "flashtool.py returned non-zero exit code"
-
-        except subprocess.TimeoutExpired:
-            last_error = f"CAN flash timeout ({timeout}s)"
-
         except OSError as exc:
             last_error = f"Failed to run flashtool.py: {exc}"
             break  # OSError is not transient -- don't retry
+
+        if result.timed_out:
+            last_error = f"CAN flash timeout ({timeout}s)"
+        elif result.returncode == 0:
+            return FlashResult(
+                success=True,
+                method="katapult_can",
+                elapsed_seconds=time.monotonic() - start,
+            )
+        else:
+            last_error = "flashtool.py returned non-zero exit code"
 
         # Pause between retries
         if attempt < max_retries:
@@ -872,6 +671,7 @@ def execute_flash(
     firmware_path: str,
     config: GlobalConfig,
     timeout: int = TIMEOUT_FLASH,
+    em: Optional[Emitter] = None,
 ) -> FlashResult:
     """Dispatch flash operation to the correct method based on entry.flash_command.
 
@@ -885,6 +685,7 @@ def execute_flash(
         firmware_path: Path to the firmware file.
         config: GlobalConfig with klipper_dir, katapult_dir paths.
         timeout: Seconds before timeout (applies to katapult and make_flash).
+        em: Event emitter forwarded to method handlers for status lines.
 
     Returns:
         FlashResult with success status and method name.
@@ -938,6 +739,7 @@ def execute_flash(
             firmware_path=firmware_path,
             mount_path=entry.uf2_mount_path,
             timeout=15,
+            em=em,
         )
 
     if flash_command == "katapult_can":

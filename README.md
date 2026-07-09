@@ -2,7 +2,8 @@
 
 Interactive TUI for building and flashing [Kalico](https://docs.kalico.gg) and Klipper firmware on Raspberry Pi and similar Linux SBCs. Replaces the manual `make menuconfig` / `make` / `make flash` cycle with device profiles, cached configs, and a guided interactive flow — for both USB and CAN bus devices.
 
-No pip dependencies. Runs on Python stdlib only.
+One pip dependency ([Textual](https://textual.textualize.io/), for the UI),
+installed into a private venv by `install.sh`. The engine itself is stdlib-only.
 
 ## Requirements
 
@@ -12,7 +13,8 @@ No pip dependencies. Runs on Python stdlib only.
 - `make` and `arm-none-eabi-gcc` (typically installed as part of Klipper setup)
 - Kalico or Klipper source tree (default `~/klipper`)
 - Katapult source tree for Katapult and CAN flash methods (default `~/katapult`)
-- `sudo` for Klipper service stop/start during flash (passwordless recommended)
+- `sudo` for Klipper service stop/start during flash (scoped passwordless sudo recommended — see [Sudo Configuration](#sudo-configuration))
+- When flashing over SSH, run inside `tmux` or `screen` — a dropped connection mid-flash aborts the operation (kflash restores the Klipper service on disconnect, but the flash itself is interrupted)
 - Moonraker (recommended — enables print safety checks, firmware version display, and CAN device status)
 
 ## Install
@@ -26,11 +28,25 @@ kflash
 
 The installer:
 
+- Creates a virtualenv at `~/kflash/.venv` (override with `KFLASH_VENV=...`)
+  and installs kflash there with its dependencies — the same pattern Klipper
+  itself uses (`klippy-env`). Requires `python3-venv` on Pi OS / Debian.
 - Creates a `kflash` symlink in `~/.local/bin` (adds to `PATH` if needed)
 - Checks for prerequisites (`python3`, `arm-none-eabi-gcc`, `dialout` group, `sudo`)
 - Optionally installs `ccache` for faster rebuilds
 - Accepts `./install.sh --yes` for non-interactive install
-- Symlink-based — `git pull` updates take effect immediately
+- Editable install — `git pull` updates take effect immediately; re-run
+  `./install.sh` after a pull that changes dependencies
+
+Alternatively, install as a Python package into an environment of your choice
+(provides the `kflash` command via a standard entry point):
+
+```bash
+git clone https://github.com/YanceyA/kflash.git ~/kflash
+cd ~/kflash
+pip install -e .
+kflash
+```
 
 ## Quick Start
 
@@ -41,6 +57,23 @@ The installer:
 
 That's it. kflash handles Klipper service management, bootloader entry, and device verification automatically.
 
+### The UI
+
+`kflash` launches a terminal UI built on
+[Textual](https://textual.textualize.io/): the Status / Devices / Actions
+dashboard with cursor-driven device selection (up/down or `j`/`k`, number keys
+to jump, `Enter`/`F` to flash the highlighted device), live device hotplug
+refresh, a dedicated operation screen for flashes (phase checklist, elapsed
+timers, log tail, sticky failure output, Flash All results table), modal
+dialogs instead of scroll-away prompts, direct menuconfig entry (`M`), and a
+config-diff receipt after every menuconfig round-trip.
+
+If the `textual` package is missing (e.g. after a `git pull` without re-running
+`./install.sh`), kflash exits with install instructions: re-run `./install.sh`,
+or `pip install 'textual>=8.2,<9'` into the Python running kflash. (The
+hand-rolled legacy UI and its `--legacy-ui` flag were removed after the Textual
+UI reached parity; the flag is now accepted and ignored.)
+
 ## Main Menu
 
 | Key | Action | Description |
@@ -49,6 +82,7 @@ That's it. kflash handles Klipper service management, bootloader entry, and devi
 | `B` | Flash All | Batch-flash all connected devices using cached configs |
 | `A` | Add Device | Register a new USB or CAN device |
 | `E` | Config Device | Edit device name, MCU, flash method, or exclusion |
+| `M` | Menuconfig | Edit a device's firmware config directly (no flash) |
 | `D` | Refresh Devices | Re-scan USB bus for connected devices |
 | `R` | Remove Device | Delete a device from the registry |
 | `C` | Settings | Configure global options (ccache, paths, delays) |
@@ -72,7 +106,7 @@ Before flashing, kflash queries Moonraker to check printer state:
 - **Blocked states:** `printing`, `paused`, `startup` — flashing is prevented with a clear message
 - **Error state:** prompts for confirmation (flashing may be needed to recover)
 - **Moonraker unreachable:** prompts for explicit confirmation before proceeding
-- **Klipper service:** if active before flash, restart is guaranteed on all exit paths (success, failure, Ctrl+C)
+- **Klipper service:** if active before flash, restart is guaranteed on all exit paths (success, failure, Ctrl+C, SIGTERM, SSH disconnect/SIGHUP)
 - **Version warnings:** flags when host Klipper has uncommitted changes (`-dirty`) or when MCU firmware would be a downgrade
 
 ### Timeouts
@@ -156,7 +190,7 @@ Accessible from the main menu with `C`. All settings persist in the device regis
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Skip menuconfig | OFF | Skip menuconfig when a cached `.config` exists |
+| Menuconfig prompt before flash | ON | Offer menuconfig before each flash; when OFF, a cached `.config` flashes directly (a first flash still requires menuconfig) |
 | Build acceleration (ccache) | OFF | Use ccache for faster rebuilds (prompts to install if missing) |
 | Flash stagger delay | 2.0s | Pause between devices during Flash All |
 | Menu return delay | 5.0s | Pause after flash output before returning to menu |
@@ -184,6 +218,24 @@ The registry path can be overridden with the `KALICO_REGISTRY_PATH` environment 
 - Build output shows per-build cache hit/miss stats
 
 Manual install: `sudo apt install -y ccache`
+
+## Sudo Configuration
+
+kflash uses `sudo` for two operations: stopping and starting the Klipper service around a flash. For unattended use (no password prompts), grant passwordless sudo for **only those two commands**:
+
+```bash
+sudo visudo -f /etc/sudoers.d/kflash
+```
+
+```
+yourusername ALL=(root) NOPASSWD: /usr/bin/systemctl stop klipper, /usr/bin/systemctl start klipper
+```
+
+(Use `command -v systemctl` if your distribution puts systemctl somewhere other than `/usr/bin`.)
+
+**Do not use `NOPASSWD: ALL`**, and do not add `tee` to sudoers — passwordless `tee` can write any file on the system as root and is effectively full root access. The optional USB re-enumeration check may invoke `sudo tee` on a sysfs path; it is expected to prompt for a password (or be skipped) on a scoped setup — that is by design.
+
+If you skip this, kflash prompts for your sudo password at the start of a flash and caches it for the run. If credentials expire during a long batch, kflash re-prompts before restarting Klipper rather than leaving it stopped.
 
 ## Moonraker Update Manager
 
@@ -233,7 +285,9 @@ rm -rf ~/.config/kalico-flash
 
 **Build fails with missing toolchain:** Install the ARM cross-compiler: `sudo apt install gcc-arm-none-eabi`
 
-**Sudo password prompts during flash:** kflash uses `sudo` to stop/start the Klipper service. For unattended use, configure passwordless sudo for `systemctl`.
+**Sudo password prompts during flash:** kflash uses `sudo` to stop/start the Klipper service. For unattended use, add a scoped sudoers entry for the two `systemctl` commands — see [Sudo Configuration](#sudo-configuration). Avoid `NOPASSWD: ALL`.
+
+**SSH disconnected mid-flash:** kflash converts the hangup into a clean shutdown and restarts the Klipper service, but the flash itself is aborted — the device may be left in bootloader mode. Re-run the flash after reconnecting, and prefer running kflash inside `tmux`/`screen` so the session survives disconnects.
 
 ## Known Working Hardware
 
