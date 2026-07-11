@@ -213,6 +213,14 @@ def test_escape_clean_returns(tmp_path, monkeypatch) -> None:
 
 def test_device_config_snapshot(tmp_path, monkeypatch, snap_compare) -> None:
     monkeypatch.setattr(devcfg, "get_mcu_serial_map", lambda: None)
+    # The screen renders "Last Flashed: <ts> (N days ago)" relative to
+    # datetime.now() (see devcfg._format_last_flash), so the "(N days ago)" part
+    # drifts every day and the snapshot only matches on the date it was
+    # generated. Pin the formatted string so the snapshot is deterministic on
+    # any run date; the frozen value matches the committed baseline exactly.
+    monkeypatch.setattr(
+        devcfg, "_format_last_flash", lambda _iso: "2026-02-06 14:30 (152 days ago)"
+    )
     registry = _registry(tmp_path)
 
     async def _settle(pilot) -> None:
