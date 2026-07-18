@@ -7,6 +7,8 @@ plus the small pure predicates.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from kflash import safety
@@ -153,9 +155,16 @@ def test_resolve_registry_path_env_override(monkeypatch):
 def test_resolve_registry_path_xdg(monkeypatch):
     monkeypatch.delenv("KALICO_REGISTRY_PATH", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", "/xdg")
-    assert safety.resolve_registry_path() == "/xdg/kalico-flash/devices.json"
+    # os.path.join is platform-aware; build the expected path the same way the
+    # implementation does so this passes on both POSIX (the target) and Windows.
+    expected = os.path.join("/xdg", "kalico-flash", "devices.json")
+    assert safety.resolve_registry_path() == expected
 
 
+# HOME + expanduser("~") drive this path; those are POSIX semantics that
+# Windows' ntpath.expanduser ignores (it consults USERPROFILE, not HOME), so
+# gate this test to POSIX. The XDG override path above still covers Windows.
+@pytest.mark.skipif(os.name != "posix", reason="HOME/expanduser is POSIX-only")
 def test_resolve_registry_path_default_home(monkeypatch):
     monkeypatch.delenv("KALICO_REGISTRY_PATH", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)

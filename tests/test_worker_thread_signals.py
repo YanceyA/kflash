@@ -30,6 +30,18 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# This whole module is a POSIX-signal spec (SSH-drop SIGHUP, sudo systemctl,
+# subprocess signal delivery) that only runs on the Linux target. On Windows
+# `signal.SIGHUP` doesn't exist, and it's referenced at module scope in the
+# parametrize decorator below, so skip the module during collection before that
+# reference is evaluated -- otherwise import raises AttributeError and aborts
+# the entire suite.
+if not hasattr(signal, "SIGHUP"):
+    pytest.skip(
+        "POSIX signals (SIGHUP) required; not available on this platform",
+        allow_module_level=True,
+    )
+
 # Child process: fakes runner.run to record systemctl calls, installs the
 # real production signal handlers, runs klipper_service_stopped in a worker
 # thread, and idles in the main thread like a UI event loop would.
