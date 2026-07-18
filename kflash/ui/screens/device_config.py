@@ -26,6 +26,7 @@ preserves that exactly -- it edits ``name`` and never touches the key, so no
 from __future__ import annotations
 
 import dataclasses
+import functools
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from rich.text import Text
@@ -35,7 +36,10 @@ from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
+from ...boards import profile_display_name
+from ...commands import cmd_copy_config, cmd_save_config_as_default
 from ...decisions import ChooseFlashMethodDecision
+from ...events import Emitter, FlashEvent
 from ...models import DeviceEntry
 from ...moonraker import get_mcu_serial_map
 from ...validation import (
@@ -44,11 +48,19 @@ from ...validation import (
     validate_can_interface,
     validate_canbus_uuid,
 )
+from .. import menuconfig
 from ..dialogs import (
     ChoiceDialog,
     DecisionConfirmDialog,
     FlashMethodDialog,
     TextPromptDialog,
+    styled_modal_factory,
+)
+from ..engine_bridge import (
+    EngineBridge,
+    EngineBusyError,
+    EngineEvent,
+    EngineJobCompleted,
 )
 from ..skin import COLORS, HintLine, Panel, spaced_title
 
@@ -77,6 +89,8 @@ _HINTS: list[tuple[str, str]] = [
     ("Up/Dn", "Move"),
     ("Enter", "Edit"),
     ("S", "Save"),
+    ("D", "Save default"),
+    ("C", "Copy config"),
     ("Esc", "Back"),
 ]
 
@@ -162,6 +176,8 @@ class DeviceConfigScreen(Screen[None]):
         ("j", "cursor_down", "Down"),
         ("k", "cursor_up", "Up"),
         ("s", "save", "Save"),
+        ("d", "save_default", "Save config as default"),
+        ("c", "copy_config", "Copy config from another device"),
         ("escape", "cancel", "Back"),
         ("q", "cancel", "Back"),
     ]
@@ -171,6 +187,14 @@ class DeviceConfigScreen(Screen[None]):
         self._original_key = device_key
         self._entry: Optional[DeviceEntry] = None
         self._pending: dict[str, Any] = {}
+        # A dedicated engine bridge for the two config-cache commands (save as
+        # default / copy from another device). Created lazily on first use and
+        # torn down on unmount. Events target this screen; completion is routed
+        # back here by the app while ``_active_job_screen`` points at us.
+        self._bridge: Optional[EngineBridge] = None
+        self._job_saw_success = False
+        self._job_success_message = ""
+        self._job_error_message = ""
 
     @property
     def kflash_app(self) -> KflashApp:
@@ -211,6 +235,13 @@ class DeviceConfigScreen(Screen[None]):
         text = Text()
         text.append("MCU Type: ", style=COLORS["text"])
         text.append(f"{entry.mcu or '-'}\n", style=COLORS["value"])
+        if entry.board:
+            # Informational only: the board profile pre-filled this device at add
+            # time. It never constrains later edits (flash method, sub-fields).
+            text.append("Board: ", style=COLORS["text"])
+            text.append(
+                f"{profile_display_name(entry.board)}\n", style=COLORS["value"]
+            )
         text.append("Serial Pattern: ", style=COLORS["text"])
         if entry.serial_pattern:
             text.append(f"{entry.serial_pattern}\n", style=COLORS["value"])
@@ -220,7 +251,29 @@ class DeviceConfigScreen(Screen[None]):
         last = _format_last_flash(entry.last_flash_timestamp)
         role = "value" if entry.last_flash_timestamp else "subtle"
         text.append(last, style=COLORS[role])
+        text.append("\nConfig: ", style=COLORS["text"])
+        state_label, state_role = self._config_state()
+        text.append(state_label, style=COLORS[state_role])
         self.query_one("#device-identity", Static).update(text)
+
+    def _config_state(self) -> tuple[str, str]:
+        """A ``(label, palette-role)`` describing the cached-config state.
+
+        Best-effort: no global config (no ``klipper_dir``) or an engine hiccup
+        reports "unknown". A seeded-but-unreviewed cache surfaces the same
+        forced-review warning the dashboard shows.
+        """
+        klipper_dir = self._klipper_dir()
+        if klipper_dir is None:
+            return "unknown", "subtle"
+        try:
+            if not menuconfig.has_cached_config(self._original_key, klipper_dir):
+                return "no cached config", "subtle"
+            if menuconfig.is_seeded(self._original_key, klipper_dir):
+                return "seeded — review required", "orange"
+            return "cached", "green"
+        except Exception:
+            return "unknown", "subtle"
 
     # -- table ----------------------------------------------------------- #
     def _field_state(self, field: dict, working: DeviceEntry) -> tuple[Text, bool]:
@@ -590,6 +643,14 @@ class DeviceConfigScreen(Screen[None]):
             dashboard.refresh_devices(f"Saved {self._entry.name}.", "success")
 
     def action_cancel(self) -> None:
+        # Refuse to close while a D/C engine job is in flight (mirrors
+        # AddDeviceScreen.action_return_home): popping the screen mid-job would
+        # point the app's completion routing at an unmounted screen.
+        if self._bridge_busy():
+            self._set_status(
+                "Working... wait for the current operation to finish.", "warning"
+            )
+            return
         if self._pending:
 
             def _after(discard: Optional[bool]) -> None:
@@ -609,6 +670,201 @@ class DeviceConfigScreen(Screen[None]):
     def _close(self) -> None:
         if self is self.app.screen:
             self.app.pop_screen()
+
+    # -- config-cache actions (save as default / copy from device) ------- #
+    def _klipper_dir(self) -> Optional[str]:
+        """The configured Klipper directory, or ``None`` when unset."""
+        try:
+            config = self.kflash_app.registry.load().global_config
+        except Exception:
+            return None
+        return None if config is None else config.klipper_dir
+
+    def _bridge_busy(self) -> bool:
+        return self._bridge is not None and self._bridge.is_busy
+
+    def action_save_default(self) -> None:
+        """D: promote this device's cached config to the MCU-wide default seed."""
+        if self._entry is None:
+            return
+        if self._bridge_busy():
+            self._set_status("An operation is already running.", "warning")
+            return
+        klipper_dir = self._klipper_dir()
+        if klipper_dir is None:
+            self._set_status("Klipper directory not configured (Settings).", "error")
+            return
+        if not menuconfig.has_cached_config(self._original_key, klipper_dir):
+            self._set_status(
+                "No cached config to save as default. "
+                "Run menuconfig from the dashboard (M) first.",
+                "warning",
+            )
+            return
+        key = self._original_key
+        registry = self.kflash_app.registry
+        self._run_engine(
+            lambda em, dec: functools.partial(
+                cmd_save_config_as_default, registry, key, em, dec
+            ),
+            "save-default",
+        )
+
+    def action_copy_config(self) -> None:
+        """C: copy another device's cached config onto this one (marks seeded)."""
+        if self._entry is None:
+            return
+        if self._bridge_busy():
+            self._set_status("An operation is already running.", "warning")
+            return
+        klipper_dir = self._klipper_dir()
+        if klipper_dir is None:
+            self._set_status("Klipper directory not configured (Settings).", "error")
+            return
+        candidates = self._copy_candidates(klipper_dir)
+        if not candidates:
+            self._set_status(
+                "No other device has a cached config to copy.", "warning"
+            )
+            return
+        options: list[tuple[Any, str]] = [(key, label) for key, label in candidates]
+
+        def _after(src_key: Optional[str]) -> None:
+            if src_key is None:  # Escape / cancel
+                return
+            self._start_copy(src_key)
+
+        self.app.push_screen(
+            ChoiceDialog(
+                "Copy cached config from which device?",
+                options,
+                escape_value=None,
+                current_index=0,
+                title="copy config",
+            ),
+            _after,
+        )
+
+    def _copy_candidates(self, klipper_dir: str) -> list[tuple[str, str]]:
+        """Other registered devices that HAVE a cache, same-MCU first + labelled.
+
+        Excludes this device and any device without a cached ``.config``. Rows
+        whose MCU matches this device sort first and carry a "(same MCU)" tag so
+        the user can spot the likely-compatible starting points.
+        """
+        assert self._entry is not None
+        this_mcu = self._entry.mcu
+        try:
+            data = self.kflash_app.registry.load()
+        except Exception:
+            return []
+        items: list[tuple[bool, str, str, str]] = []
+        for entry in data.devices.values():
+            if entry.key == self._original_key:
+                continue
+            try:
+                if not menuconfig.has_cached_config(entry.key, klipper_dir):
+                    continue
+            except Exception:
+                continue
+            same = entry.mcu == this_mcu
+            label = f"{entry.name} ({entry.mcu})"
+            if same:
+                label += "  (same MCU)"
+            items.append((same, entry.name.casefold(), entry.key, label))
+        # same-MCU first (not same -> sorts after), then by display name.
+        items.sort(key=lambda t: (not t[0], t[1]))
+        return [(key, label) for _same, _name, key, label in items]
+
+    def _start_copy(self, src_key: str) -> None:
+        dst_key = self._original_key
+        registry = self.kflash_app.registry
+        self._run_engine(
+            lambda em, dec: functools.partial(
+                cmd_copy_config, registry, src_key, dst_key, em, dec
+            ),
+            "copy-config",
+        )
+
+    def _ensure_bridge(self) -> EngineBridge:
+        if self._bridge is None:
+            self._bridge = EngineBridge(
+                self.app, event_target=self, modal_factory=styled_modal_factory
+            )
+        return self._bridge
+
+    def _run_engine(self, build_job, action: str) -> None:
+        """Run a config-cache engine command on the bridge worker thread.
+
+        ``build_job(emitter, decider) -> callable`` composes the zero-arg engine
+        call. Decisions (e.g. an overwrite confirm) render as the styled R4
+        modals; the completion is routed back to :meth:`handle_job_completed`.
+        """
+        bridge = self._ensure_bridge()
+        if bridge.is_busy:
+            self._set_status("An operation is already running.", "warning")
+            return
+        emitter = Emitter(bridge.events)
+        job = build_job(emitter, bridge.decisions)
+        self._job_saw_success = False
+        self._job_success_message = ""
+        self._job_error_message = ""
+        self.kflash_app._active_job_screen = self
+        try:
+            bridge.run_engine_job(job, name=f"kflash-{action}")
+        except EngineBusyError:
+            self.kflash_app._active_job_screen = None
+            self._set_status("An operation is already running.", "warning")
+            return
+        self._set_status("Working...", "info")
+
+    def on_engine_event(self, message: EngineEvent) -> None:
+        """Capture the engine's terminal outcome for the completion message."""
+        event: FlashEvent = message.event
+        if event.kind == "success":
+            self._job_saw_success = True
+            self._job_success_message = event.message
+        elif event.kind in ("error", "error_recovery"):
+            self._job_error_message = event.error_type or event.message
+
+    def handle_job_completed(self, message: EngineJobCompleted) -> None:
+        """Finalize a config-cache job: report and refresh the config state."""
+        app = self.kflash_app
+        if app._active_job_screen is self:
+            app._active_job_screen = None
+        # Belt-and-suspenders: if some path unmounted this screen mid-job, the
+        # widgets below are gone and query_one would raise NoMatches.
+        if not self.is_mounted:
+            return
+        if message.cancelled:
+            self._set_status("Operation cancelled.", "warning")
+            return
+        if message.error is not None:
+            self._set_status(f"Operation failed: {message.error}", "error")
+            return
+        # A copy marks the cache seeded; re-render identity so it reflects that.
+        self._render_identity()
+        if self._job_saw_success:
+            self._set_status(self._job_success_message or "Done.", "success")
+        elif message.result == 0:
+            # Declined an overwrite confirm (engine returns 0, no success event).
+            self._set_status("Cancelled.", "info")
+        else:
+            self._set_status(
+                self._job_error_message or "Operation failed.", "error"
+            )
+
+    def on_unmount(self) -> None:
+        # Stop routing completions at this (now unmounted) screen, release any
+        # worker blocked on a modal, and join the non-daemon thread.
+        try:
+            app = self.kflash_app
+            if app._active_job_screen is self:
+                app._active_job_screen = None
+        except Exception:  # noqa: BLE001 -- teardown hygiene only
+            pass
+        if self._bridge is not None:
+            self._bridge.shutdown(timeout=5)
 
     # -- helpers --------------------------------------------------------- #
     def _set_status(self, message: str, level: str) -> None:

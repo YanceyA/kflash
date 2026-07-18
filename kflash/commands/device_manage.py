@@ -7,9 +7,10 @@ from ..blocklist import (
     blocked_reason_for_filename,
     build_blocked_list,
 )
+from ..config import ConfigManager, default_config_path
 from ..decisions import ConfirmDecision, DecisionProvider
 from ..discovery import is_supported_device, match_devices, scan_serial_devices
-from ..errors import ERROR_TEMPLATES
+from ..errors import ERROR_TEMPLATES, ConfigError
 from ..events import Emitter
 from ..moonraker import (
     detect_firmware_flavor,
@@ -20,19 +21,23 @@ from ..moonraker import (
 from ._common import _remove_cached_config
 
 
+def _emit_device_not_registered(em: Emitter, device_key: str) -> None:
+    template = ERROR_TEMPLATES["device_not_registered"]
+    em.error_with_recovery(
+        template["error_type"],
+        template["message_template"].format(device=device_key),
+        context={"device": device_key},
+        recovery=template["recovery_template"],
+    )
+
+
 def cmd_remove_device(
     registry, device_key: str, em: Emitter, decider: DecisionProvider
 ) -> int:
     """Remove a device from the registry with optional config cleanup."""
     entry = registry.get(device_key)
     if entry is None:
-        template = ERROR_TEMPLATES["device_not_registered"]
-        em.error_with_recovery(
-            template["error_type"],
-            template["message_template"].format(device=device_key),
-            context={"device": device_key},
-            recovery=template["recovery_template"],
-        )
+        _emit_device_not_registered(em, device_key)
         return 1
 
     em.step_divider()
@@ -215,4 +220,141 @@ def cmd_list_devices(registry, em: Emitter) -> int:
         em.info("", "")  # blank line for separation
         em.info("Version", f"Host: {detect_firmware_flavor(host_version)} {host_version}")
 
+    return 0
+
+
+def cmd_save_config_as_default(
+    registry, device_key: str, em: Emitter, decider: DecisionProvider
+) -> int:
+    """Promote a device's cached config to the MCU-wide default seed.
+
+    The saved config lives at ``defaults/<mcu>.config`` (see
+    ``ConfigManager.save_cache_as_default``) and is offered by
+    ``seed_from_default`` to any future device of the same MCU that has no
+    cache of its own yet.
+    """
+    entry = registry.get(device_key)
+    if entry is None:
+        _emit_device_not_registered(em, device_key)
+        return 1
+
+    data = registry.load()
+    if data.global_config is None:
+        em.error_with_recovery(
+            "Config error",
+            "Global config not set",
+            context={"device": device_key},
+            recovery="Configure the Klipper directory from Settings first",
+        )
+        return 1
+
+    config_mgr = ConfigManager(device_key, data.global_config.klipper_dir)
+    if not config_mgr.has_cached_config():
+        em.error_with_recovery(
+            "Config error",
+            f"No cached config for '{entry.name}'",
+            context={"device": device_key},
+            recovery="Run menuconfig for this device first",
+        )
+        return 1
+
+    dst = default_config_path(entry.mcu)
+    if dst.exists() and not decider.confirm(
+        ConfirmDecision(
+            id="overwrite_mcu_default",
+            message=f"Overwrite existing default config for MCU '{entry.mcu}'?",
+            default=False,
+        )
+    ):
+        em.info("Config", "Save as default cancelled")
+        return 0
+
+    try:
+        dst_path = config_mgr.save_cache_as_default(entry.mcu)
+    except ConfigError as exc:
+        em.error_with_recovery(
+            "Config error",
+            f"Failed to save default config: {exc}",
+            context={"device": device_key},
+            recovery="Run menuconfig for this device first",
+        )
+        return 1
+
+    em.success(f"Saved '{entry.name}' config as default for MCU '{entry.mcu}' ({dst_path})")
+    return 0
+
+
+def cmd_copy_config(
+    registry, src_key: str, dst_key: str, em: Emitter, decider: DecisionProvider
+) -> int:
+    """Copy one device's cached config onto another device.
+
+    The destination cache is marked seeded (``device:<src_key>``) so the
+    normal seed-review gate forces a menuconfig pass before it is used to
+    build/flash -- copying between devices is a starting point, not a
+    guaranteed-correct config for the destination's board.
+    """
+    if src_key == dst_key:
+        em.error("Cannot copy a device's config onto itself")
+        return 1
+
+    src_entry = registry.get(src_key)
+    if src_entry is None:
+        _emit_device_not_registered(em, src_key)
+        return 1
+
+    dst_entry = registry.get(dst_key)
+    if dst_entry is None:
+        _emit_device_not_registered(em, dst_key)
+        return 1
+
+    data = registry.load()
+    if data.global_config is None:
+        em.error_with_recovery(
+            "Config error",
+            "Global config not set",
+            context={"device": dst_key},
+            recovery="Configure the Klipper directory from Settings first",
+        )
+        return 1
+
+    klipper_dir = data.global_config.klipper_dir
+    src_mgr = ConfigManager(src_key, klipper_dir)
+    if not src_mgr.has_cached_config():
+        em.error_with_recovery(
+            "Config error",
+            f"No cached config for '{src_entry.name}' to copy",
+            context={"device": src_key},
+            recovery="Run menuconfig for the source device first",
+        )
+        return 1
+
+    dst_mgr = ConfigManager(dst_key, klipper_dir)
+    if dst_mgr.has_cached_config() and not decider.confirm(
+        ConfirmDecision(
+            id="overwrite_config_copy",
+            message=(
+                f"Overwrite cached config for '{dst_entry.name}' with "
+                f"the config from '{src_entry.name}'?"
+            ),
+            default=False,
+        )
+    ):
+        em.info("Config", "Copy cancelled")
+        return 0
+
+    if not dst_mgr.seed_from_device(src_key):
+        # Race: source cache vanished between the check above and now.
+        em.error_with_recovery(
+            "Config error",
+            f"No cached config for '{src_entry.name}' to copy",
+            context={"device": src_key},
+            recovery="Run menuconfig for the source device first",
+        )
+        return 1
+
+    em.success(
+        f"Copied config from '{src_entry.name}' to '{dst_entry.name}' -- "
+        "run menuconfig to review before the next flash"
+    )
     return 0

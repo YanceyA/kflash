@@ -44,6 +44,7 @@ class DeviceEntry:
     notes: Optional[str] = None  # Free-form user notes
     role: Optional[str] = None  # "toolhead" or "bridge" (CAN Flash All ordering)
     last_flash_timestamp: Optional[str] = None  # ISO format: "2026-02-06T14:30:00"
+    board: Optional[str] = None  # BoardProfile key
 
     @property
     def is_can_device(self) -> bool:

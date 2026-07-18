@@ -31,5 +31,9 @@ nul
 # Local scratch
 .dev/
 
+# Local-only process notes (AI session handoffs, design plans)
+.handoffs/
+docs/plans/
+
 # pytest-textual-snapshot report artifact
 snapshot_report.html

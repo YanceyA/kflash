@@ -215,8 +215,8 @@ KConfirmScreen .dialog-message {
 
 .kf-modal OptionList > .option-list--option-highlighted,
 .kf-modal OptionList:focus > .option-list--option-highlighted {
-    background: $kf-header;
-    color: $kf-background;
+    background: $kf-selection;
+    color: $kf-value;
     text-style: none;
 }
 

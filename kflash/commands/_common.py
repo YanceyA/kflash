@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Optional
 
 from ..config import get_config_dir
 from ..decisions import ConfirmDecision, DecisionProvider
@@ -20,6 +21,20 @@ def _short_path(path_value: str) -> str:
         return Path(path_value).name
     except (TypeError, ValueError):
         return path_value
+
+
+def emit_output_tail(
+    em: Emitter, output: Optional[str], *, section: str = "Build", limit: int = 20
+) -> None:
+    """Emit the last *limit* lines of captured subprocess *output*.
+
+    No-ops on falsy output. Strips trailing whitespace before splitting so a
+    trailing-newline-only final line doesn't consume one of the *limit* slots.
+    """
+    if not output:
+        return
+    for line in output.strip().splitlines()[-limit:]:
+        em.info(section, line)
 
 
 def _remove_cached_config(

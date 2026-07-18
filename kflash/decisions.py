@@ -71,6 +71,25 @@ class ChooseCcacheActionDecision:
 
 
 @dataclass(frozen=True)
+class BoardProfileChoice:
+    key: str
+    label: str  # "BTT Octopus Pro v1.0/1.1 (STM32H723)"
+    notes: str  # picker detail line
+
+
+@dataclass(frozen=True)
+class ChooseBoardProfileDecision:
+    """-> profile key, "other" (manual setup), or None (cancel wizard).
+
+    "other" is a reserved sentinel: boards.py rejects user profiles that
+    declare it as their key, so it can never collide with a real profile.
+    """
+
+    detected_mcu: str
+    choices: list[BoardProfileChoice]
+
+
+@dataclass(frozen=True)
 class TextPromptDecision:
     message: str
     default: str = ""
@@ -93,6 +112,10 @@ class DecisionProvider(Protocol):
     def mcu_mismatch(self, req: McuMismatchDecision) -> str: ...  # "r" | "d" | "k"
 
     def choose_ccache_action(self, req: ChooseCcacheActionDecision) -> str: ...
+
+    def choose_board_profile(
+        self, req: ChooseBoardProfileDecision
+    ) -> Optional[str]: ...  # profile key | "other" | None
 
     def prompt_text(self, req: TextPromptDecision) -> Optional[str]: ...
 
@@ -150,6 +173,11 @@ class HeadlessDecisionProvider:
     def choose_ccache_action(self, req: ChooseCcacheActionDecision) -> str:
         self._fail("choose_ccache_action")
         return "skip"
+
+    def choose_board_profile(self, req: ChooseBoardProfileDecision) -> Optional[str]:
+        # "default" degrades to today's manual wizard (safe); "fail" raises.
+        self._fail("choose_board_profile")
+        return "other"
 
     def prompt_text(self, req: TextPromptDecision) -> Optional[str]:
         if req.required and not req.default:

@@ -12,9 +12,10 @@ this screen renders the engine's :class:`~kflash.events.FlashEvent` stream
 * a **scrolling log tail** (:class:`~textual.widgets.RichLog`) of every event,
   styled by the shared :func:`render_event` (also used to render the
   ``error_recovery`` context key/values);
-* a **progress bar** fed by ``FlashEvent.progress`` when present, and otherwise
-  by any percentage parsed out of an event's message text (e.g. a katapult
-  ``flashtool.py`` line that flows through as an ``info``/``phase`` message);
+* a **progress bar** fed only by structured ``FlashEvent.progress`` values (the
+  engine emits these from real flashtool output); the panel stays hidden until
+  the first such value arrives, and re-hides on the next ``device_divider`` in
+  Flash All mode so a finished device's bar doesn't linger into the next one;
 * in **Flash All** mode, a device ``i/N`` header and a **results table**
   (device / result / duration / version) that fills as devices complete and is
   the final view.
@@ -61,8 +62,6 @@ _CHECKLIST: tuple[str, ...] = (
 )
 _MATCH: dict[str, str] = {name.lower(): name for name in _CHECKLIST}
 
-# First percentage in a line, e.g. "Writing... 45%" or "[####    ] 45.0%".
-_PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 # "Flashing 3 device(s)" -> the batch total, for the i/N header before the first
 # device_divider arrives.
 _TOTAL = re.compile(r"(\d+)\s+device")
@@ -167,6 +166,9 @@ class OperationScreen(Screen[None]):
     OperationScreen DataTable {
         max-height: 12;
     }
+    OperationScreen #op-progress-panel {
+        display: none;
+    }
     """
 
     BINDINGS = [
@@ -206,7 +208,7 @@ class OperationScreen(Screen[None]):
                 yield Static(self._header_text(), id="op-header")
             with Panel(title="phases"):
                 yield Static(id="op-checklist")
-            with Panel(title="progress"):
+            with Panel(title="progress", id="op-progress-panel"):
                 yield Static(Text("", style=COLORS["text"]), id="op-progress-label")
                 yield ProgressBar(total=100, show_eta=False, id="op-progress")
             if self._mode == "all":
@@ -271,22 +273,21 @@ class OperationScreen(Screen[None]):
 
     # -- progress bar ---------------------------------------------------- #
     def _drive_progress(self, event: FlashEvent) -> None:
-        pct: Optional[float] = None
-        if event.progress is not None:
-            pct = max(0.0, min(1.0, event.progress)) * 100.0
-        else:
-            match = _PERCENT.search(event.message or "")
-            if match:
-                value = float(match.group(1))
-                if 0.0 <= value <= 100.0:
-                    pct = value
-        if pct is None:
+        if event.progress is None:
             return
+        pct = max(0.0, min(1.0, event.progress)) * 100.0
+        self.query_one("#op-progress-panel").display = True
         self.query_one("#op-progress", ProgressBar).update(progress=pct)
         label = event.section or "Progress"
         self.query_one("#op-progress-label", Static).update(
             Text(f"{label}: {pct:.0f}%", style=COLORS["text"])
         )
+
+    def _reset_progress(self) -> None:
+        """Hide the progress panel and zero the bar/label for the next device."""
+        self.query_one("#op-progress-panel").display = False
+        self.query_one("#op-progress", ProgressBar).update(progress=0)
+        self.query_one("#op-progress-label", Static).update(Text(""))
 
     # -- header (Flash All device i/N) ----------------------------------- #
     def _drive_header(self, event: FlashEvent) -> None:
@@ -298,6 +299,7 @@ class OperationScreen(Screen[None]):
                 self._device_total = event.total
             if event.name:
                 self._current_device = event.name
+            self._reset_progress()
             changed = True
         elif self._device_total == 0 and event.message:
             match = _TOTAL.search(event.message)

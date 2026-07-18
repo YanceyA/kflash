@@ -36,6 +36,33 @@ CAN_RETRY_ATTEMPTS = 3  # Retry on transient CAN bus errors
 # Default Moonraker virtualenv path
 DEFAULT_MOONRAKER_VENV = "~/moonraker-env"
 
+# Matches a percentage progress marker in flashtool.py / make flash output
+# (e.g. "[########..] 80%"). The left-boundary lookbehind (rejects a
+# preceding digit, '.', or '-') keeps this from matching inside a longer
+# digit run -- e.g. "5100%" or "1000%" must NOT extract a spurious "100"/"000"
+# -- and from treating a negative number like "-100%" as an in-range value.
+_FLASH_PERCENT = re.compile(r"(?<![-\d.])(\d{1,3}(?:\.\d+)?)\s*%")
+
+
+def _flash_line_emitter(em: Emitter) -> Callable[[str], None]:
+    """Build an ``on_line`` callback that routes flash subprocess output
+    through the event emitter -- percent markers become ``progress`` events,
+    everything else becomes an ``info`` line under the "Flash" section."""
+
+    def _on_line(line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        match = _FLASH_PERCENT.search(text)
+        if match:
+            value = float(match.group(1))
+            if 0.0 <= value <= 100.0:
+                em.progress("Flash", text, progress=value / 100.0)
+                return
+        em.info("Flash", text)
+
+    return _on_line
+
 
 def _get_python_path() -> str:
     """Get Python interpreter path, preferring Moonraker venv.
@@ -252,7 +279,7 @@ def check_katapult(
 
 
 # ---------------------------------------------------------------------------
-# Phase 45+ Public API: Flash command functions with inherited stdio
+# Phase 45+ Public API: Flash command functions, output streamed via Emitter
 # ---------------------------------------------------------------------------
 
 
@@ -262,11 +289,13 @@ def flash_katapult(
     katapult_dir: str,
     klipper_dir: str = "~/klipper",
     timeout: int = TIMEOUT_FLASH,
+    em: Optional[Emitter] = None,
 ) -> FlashResult:
-    """Flash firmware using Katapult flashtool.py with inherited stdio.
+    """Flash firmware using Katapult flashtool.py.
 
     Uses klippy-env Python interpreter for pyserial access. Output streams
-    to terminal in real-time (no capture).
+    line-by-line through the event emitter (percent markers become
+    ``progress`` events; everything else becomes a "Flash" info line).
 
     Args:
         device_path: Path to the USB serial device.
@@ -274,10 +303,13 @@ def flash_katapult(
         katapult_dir: Path to the Katapult directory.
         klipper_dir: Path to the Klipper directory (for klippy-env python).
         timeout: Seconds before timeout.
+        em: Event emitter for streamed output. Defaults to a silent no-op
+            emitter.
 
     Returns:
         FlashResult with success status and method='katapult'.
     """
+    em = em if em is not None else Emitter(NullSink())
     start = time.monotonic()
 
     # Build path to flashtool.py
@@ -293,9 +325,10 @@ def flash_katapult(
 
     try:
         python_path = get_klippy_env_python(klipper_dir)
-        result = runner.run_streaming(
+        result = runner.run_streaming_lines(
             [python_path, str(flashtool), "-d", device_path, "-f", firmware_path],
             timeout=timeout,
+            on_line=_flash_line_emitter(em),
         )
     except OSError as exc:
         return FlashResult(
@@ -332,28 +365,34 @@ def flash_make(
     device_path: str,
     klipper_dir: str,
     timeout: int = TIMEOUT_FLASH,
+    em: Optional[Emitter] = None,
 ) -> FlashResult:
-    """Flash firmware using make flash with inherited stdio.
+    """Flash firmware using make flash.
 
-    Runs 'make FLASH_DEVICE={device_path} flash' with cwd=klipper_dir.
-    Output streams to terminal in real-time (no capture).
+    Runs 'make FLASH_DEVICE={device_path} flash' with cwd=klipper_dir. Output
+    streams line-by-line through the event emitter (percent markers become
+    ``progress`` events; everything else becomes a "Flash" info line).
 
     Args:
         device_path: Path to the USB serial device.
         klipper_dir: Path to the Klipper directory.
         timeout: Seconds before timeout.
+        em: Event emitter for streamed output. Defaults to a silent no-op
+            emitter.
 
     Returns:
         FlashResult with success status and method='make_flash'.
     """
+    em = em if em is not None else Emitter(NullSink())
     start = time.monotonic()
     klipper_path = Path(klipper_dir).expanduser()
 
     try:
-        result = runner.run_streaming(
+        result = runner.run_streaming_lines(
             ["make", f"FLASH_DEVICE={device_path}", "flash"],
             cwd=str(klipper_path),
             timeout=timeout,
+            on_line=_flash_line_emitter(em),
         )
     except OSError as exc:
         return FlashResult(
@@ -392,11 +431,13 @@ def flash_sdcard(
     klipper_dir: str,
     board_name: str,
     timeout: int = 120,
+    em: Optional[Emitter] = None,
 ) -> FlashResult:
     """Flash firmware using Klipper's flash-sdcard.sh script.
 
     Runs 'scripts/flash-sdcard.sh {device_path} {board_name}' with cwd=klipper_dir.
-    Output streams to terminal in real-time (no capture).
+    Output streams line-by-line through the event emitter (percent markers
+    become ``progress`` events; everything else becomes a "Flash" info line).
 
     Args:
         device_path: Path to the USB serial device.
@@ -404,10 +445,13 @@ def flash_sdcard(
         klipper_dir: Path to the Klipper directory.
         board_name: Board identifier for flash-sdcard.sh (e.g., 'btt-octopus-pro-h723-v1.1').
         timeout: Seconds before timeout.
+        em: Event emitter for streamed output. Defaults to a silent no-op
+            emitter.
 
     Returns:
         FlashResult with success status and method='flash_sdcard'.
     """
+    em = em if em is not None else Emitter(NullSink())
     start = time.monotonic()
 
     # Validate board_name
@@ -432,10 +476,11 @@ def flash_sdcard(
         )
 
     try:
-        result = runner.run_streaming(
+        result = runner.run_streaming_lines(
             [str(script), device_path, board_name],
             cwd=str(klipper_path),
             timeout=timeout,
+            on_line=_flash_line_emitter(em),
         )
     except OSError as exc:
         return FlashResult(
@@ -591,12 +636,16 @@ def flash_katapult_can(
     katapult_dir: str,
     timeout: int = TIMEOUT_CAN_FLASH,
     max_retries: int = CAN_RETRY_ATTEMPTS,
+    em: Optional[Emitter] = None,
 ) -> FlashResult:
     """Flash firmware using Katapult flashtool.py over CAN bus with retry logic.
 
     Uses ``python3`` (not klippy-env) since CAN mode in flashtool.py uses
     only stdlib (raw CAN sockets).  Retries on non-zero exit codes (transient
-    CAN bus errors) but breaks immediately on OSError (not transient).
+    CAN bus errors) but breaks immediately on OSError (not transient). Output
+    streams line-by-line through the event emitter on each attempt (percent
+    markers become ``progress`` events; everything else becomes a "Flash"
+    info line).
 
     Args:
         uuid: CAN bus UUID (12-char hex) of the target device.
@@ -605,10 +654,13 @@ def flash_katapult_can(
         katapult_dir: Path to the Katapult directory.
         timeout: Seconds before timeout per attempt.
         max_retries: Maximum number of flash attempts.
+        em: Event emitter for streamed output. Defaults to a silent no-op
+            emitter.
 
     Returns:
         FlashResult with success status and method='katapult_can'.
     """
+    em = em if em is not None else Emitter(NullSink())
     start = time.monotonic()
 
     # Build path to flashtool.py
@@ -625,7 +677,7 @@ def flash_katapult_can(
     last_error = ""
     for attempt in range(1, max_retries + 1):
         try:
-            result = runner.run_streaming(
+            result = runner.run_streaming_lines(
                 [
                     "python3",
                     str(flashtool),
@@ -637,6 +689,7 @@ def flash_katapult_can(
                     firmware_path,
                 ],
                 timeout=timeout,
+                on_line=_flash_line_emitter(em),
             )
         except OSError as exc:
             last_error = f"Failed to run flashtool.py: {exc}"
@@ -709,6 +762,7 @@ def execute_flash(
             katapult_dir=config.katapult_dir,
             klipper_dir=config.klipper_dir,
             timeout=timeout,
+            em=em,
         )
 
     if flash_command == "make_flash":
@@ -723,6 +777,7 @@ def execute_flash(
             device_path=device_path,
             klipper_dir=config.klipper_dir,
             timeout=timeout,
+            em=em,
         )
 
     if flash_command == "flash_sdcard":
@@ -732,6 +787,7 @@ def execute_flash(
             klipper_dir=config.klipper_dir,
             board_name=entry.sdcard_board or "",
             timeout=120,
+            em=em,
         )
 
     if flash_command == "uf2_mount":
@@ -764,6 +820,7 @@ def execute_flash(
             firmware_path=firmware_path,
             katapult_dir=config.katapult_dir,
             timeout=TIMEOUT_CAN_FLASH,
+            em=em,
         )
 
     # Unknown flash command

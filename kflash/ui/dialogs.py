@@ -32,6 +32,7 @@ from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..decisions import (
+    ChooseBoardProfileDecision,
     ChooseCcacheActionDecision,
     ChooseDeviceDecision,
     ChooseFlashMethodDecision,
@@ -48,6 +49,7 @@ __all__ = [
     "DecisionConfirmDialog",
     "ChoiceDialog",
     "FlashMethodDialog",
+    "BoardProfileDialog",
     "ManualBootloaderDialog",
     "TextPromptDialog",
     "styled_modal_factory",
@@ -255,6 +257,10 @@ class ChoiceDialog(ModalScreen[Optional[Any]]):
             self.dismiss(self._options[index][0])
 
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        # NOTE for subclasses: if you add your own on_key, do NOT call
+        # super().on_key() -- Textual dispatches every on_key in the MRO, so
+        # this base handler fires regardless; calling super() double-invokes
+        # it (double-dismiss ScreenStackError). See BoardProfileDialog.on_key.
         if event.key in "123456789":
             number = int(event.key) - 1
             if 0 <= number < len(self._options):
@@ -307,6 +313,73 @@ class FlashMethodDialog(ChoiceDialog):
             title="flash method",
             details=details,
         )
+
+
+class BoardProfileDialog(ChoiceDialog):
+    """The board-profile picker -> profile ``key``, ``"other"``, or ``None``.
+
+    Mirrors the flash-method picker's visual family (numbered list + a muted
+    ``notes`` detail line per row). The wizard offers three outcomes:
+
+    * pick a profile (number-jump ``1``..``9`` or Up/Dn + Enter) -> its ``key``;
+    * ``O`` (or the appended "Other (manual setup)" row) -> ``"other"``, which
+      degrades to today's manual wizard; and
+    * ``Escape`` -> ``None``, cancelling the wizard.
+
+    The detected MCU is shown in the prompt so the user can sanity-check the
+    filtered list. ``"other"`` is appended as the final numbered row so it is
+    reachable by cursor/number too, not only the ``O`` shortcut (which is a
+    letter and therefore never collides with the numbered list, however long).
+    """
+
+    def __init__(self, request: ChooseBoardProfileDecision) -> None:
+        options: list[tuple[Any, str]] = [
+            (choice.key, choice.label) for choice in request.choices
+        ]
+        details = [choice.notes for choice in request.choices]
+        options.append(("other", "Other (manual setup)"))
+        details.append("Configure this board manually without a profile.")
+        prompt = f"Select a board profile  (Detected MCU: {request.detected_mcu})"
+        super().__init__(
+            prompt,
+            options,
+            allow_cancel=True,
+            escape_value=None,
+            title="board profile",
+            details=details,
+        )
+
+    def compose(self) -> ComposeResult:
+        # Mirror ChoiceDialog's body but advertise the O (Other) shortcut in the
+        # footer alongside the standard move/jump/select/cancel hints.
+        with Panel(title=self._title, classes="dialog"):
+            yield Static(
+                Text(self._prompt, style=COLORS["prompt"]),
+                classes="dialog-message",
+            )
+            option_widgets = [
+                Option(self._option_label(index, label))
+                for index, (_value, label) in enumerate(self._options)
+            ]
+            yield OptionList(*option_widgets, id="choice-list")
+            yield Static("", id="choice-detail", classes="dialog-detail")
+            yield HintLine(
+                [
+                    ("Up/Dn", "Move"),
+                    ("1-9", "Jump"),
+                    ("Enter", "Select"),
+                    ("O", "Other"),
+                    ("Esc", "Cancel"),
+                ]
+            )
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        # Only the O (Other) shortcut lives here. Textual dispatches every
+        # ``on_key`` in the MRO, so ChoiceDialog.on_key still handles the number
+        # jump / Escape -- calling super() here would double-invoke it.
+        if event.key in ("o", "O"):
+            event.stop()
+            self.dismiss("other")
 
 
 class ManualBootloaderDialog(ModalScreen[bool]):
@@ -460,6 +533,9 @@ def styled_modal_factory(request: Any) -> ModalScreen:
             escape_value="skip",
             title="ccache",
         )
+
+    if isinstance(request, ChooseBoardProfileDecision):
+        return BoardProfileDialog(request)
 
     if isinstance(request, TextPromptDecision):
         return TextPromptDialog(request.message, request.default, request.required)

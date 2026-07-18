@@ -73,6 +73,9 @@ class KflashApp(App[None]):
     def on_engine_job_completed(self, message: EngineJobCompleted) -> None:
         # Bridge posts completion to the app; route it to the screen that owns
         # the job (the add-device wizard, if active) else the dashboard.
+        # NOTE: tests/ui/test_device_config.py's ConfigHost.on_engine_job_completed
+        # mirrors this routing (active job screen else dashboard) -- keep the two
+        # in sync if this dispatch changes.
         target = self._active_job_screen or self._dashboard
         if target is not None:
             target.handle_job_completed(message)

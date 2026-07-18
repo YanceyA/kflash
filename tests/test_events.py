@@ -14,16 +14,9 @@ from __future__ import annotations
 import io
 from contextlib import redirect_stderr, redirect_stdout
 
+from conftest import RecordingSink
+
 from kflash.events import Emitter, FlashEvent, NullSink, TeeSink
-
-
-class RecordingSink:
-    def __init__(self):
-        self.events: list[FlashEvent] = []
-
-    def emit(self, event: FlashEvent) -> None:
-        self.events.append(event)
-
 
 # ---------------------------------------------------------------------------
 # Emitter -> FlashEvent mapping

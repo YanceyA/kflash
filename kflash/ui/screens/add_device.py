@@ -216,12 +216,16 @@ class AddDeviceScreen(Screen[None]):
             self._offer_configure()
 
     # -- post-add configure (menuconfig under suspend + diff receipt) ----- #
-    def _new_device(self) -> Optional[tuple[str, str]]:
-        """Return ``(device_key, klipper_dir)`` for the just-added device.
+    def _new_device(
+        self,
+    ) -> Optional[tuple[str, str, Optional[str], Optional[str]]]:
+        """Return ``(device_key, klipper_dir, mcu, board)`` for the just-added device.
 
         Finds the single new registry key vs the pre-job snapshot; returns
         ``None`` if zero or several appeared (ambiguous) or there is no global
-        config to build against.
+        config to build against. ``mcu`` and ``board`` (from the new registry
+        row) are threaded into the menuconfig helper so a first-flash config can
+        be seeded (board fragment preferred over MCU default).
         """
         try:
             data = self.kflash_app.registry.load()
@@ -232,18 +236,22 @@ class AddDeviceScreen(Screen[None]):
         new_keys = set(data.devices.keys()) - self._keys_before
         if len(new_keys) != 1:
             return None
-        return next(iter(new_keys)), data.global_config.klipper_dir
+        key = next(iter(new_keys))
+        entry = data.devices.get(key)
+        mcu = entry.mcu if entry is not None else None
+        board = entry.board if entry is not None else None
+        return key, data.global_config.klipper_dir, mcu, board
 
     def _offer_configure(self) -> None:
         """Offer to run menuconfig for the newly-added device (post-add)."""
         target = self._new_device()
         if target is None:
             return
-        device_key, klipper_dir = target
+        device_key, klipper_dir, mcu, board = target
 
         def _after_offer(configure: Optional[bool]) -> None:
             if configure:
-                self._run_configure(device_key, klipper_dir)
+                self._run_configure(device_key, klipper_dir, mcu, board)
 
         self.app.push_screen(
             DecisionConfirmDialog(
@@ -252,10 +260,16 @@ class AddDeviceScreen(Screen[None]):
             _after_offer,
         )
 
-    def _run_configure(self, device_key: str, klipper_dir: str) -> None:
+    def _run_configure(
+        self,
+        device_key: str,
+        klipper_dir: str,
+        mcu: Optional[str] = None,
+        board: Optional[str] = None,
+    ) -> None:
         """Suspend, run menuconfig, then show the diff receipt (informational)."""
         result = menuconfig.run_menuconfig_suspended(
-            self.app, device_key, klipper_dir
+            self.app, device_key, klipper_dir, mcu, board
         )
         log = self.query_one("#add-log", RichLog)
         if result.cancelled:

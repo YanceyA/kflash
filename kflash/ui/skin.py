@@ -90,6 +90,11 @@ COLORS: dict[str, str] = {name: _hex(rgb) for name, rgb in PALETTE.items()}
 BACKGROUND: str = "#0c1013"
 # A barely-there lift for elevated surfaces (the modal dialog) -- still reads flat.
 SURFACE_LIFT: str = "#12171b"
+# Dark-teal selection band for highlighted list options. Dark enough that the
+# palette's light per-segment foregrounds (label/text/value) stay readable on
+# top of it -- Rich Text segment styles override an OptionList's highlight
+# foreground, so the highlight must work WITH the existing text colours.
+SELECTION: str = "#1d3a44"
 
 # ---------------------------------------------------------------------------
 # The theme
@@ -112,6 +117,7 @@ _KF_VARIABLES: dict[str, str] = {
     "kf-key-info": COLORS["key_info"],
     "kf-background": BACKGROUND,
     "kf-surface": SURFACE_LIFT,
+    "kf-selection": SELECTION,
 }
 
 KFLASH_THEME_NAME = "kflash"

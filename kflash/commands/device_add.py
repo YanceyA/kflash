@@ -11,10 +11,13 @@ import fnmatch
 import sys
 from typing import cast
 
+from .. import boards
 from ..blocklist import blocked_reason_for_filename, build_blocked_list
 from ..build import run_menuconfig
 from ..config import ConfigManager
 from ..decisions import (
+    BoardProfileChoice,
+    ChooseBoardProfileDecision,
     ChooseDeviceDecision,
     ChooseFlashMethodDecision,
     ConfirmDecision,
@@ -113,6 +116,22 @@ def _pick_mcu_name(mcu_serials: dict[str, str | None], em, decider) -> str | Non
             pass
         em.warn(f"Invalid selection '{raw}'")
     return None
+
+
+def _profile_notes(profile) -> str:
+    """Build the picker detail line for a board profile.
+
+    Starts from the profile's free-form ``notes`` and appends a compact
+    ``verified`` / ``checked_against`` freshness suffix when either is set, so
+    the picker can show provenance without a second line.
+    """
+    detail_bits = []
+    if profile.verified:
+        detail_bits.append(f"verified: {profile.verified}")
+    if profile.checked_against:
+        detail_bits.append(f"checked: {profile.checked_against}")
+    suffix = f" ({', '.join(detail_bits)})" if detail_bits else ""
+    return f"{profile.notes}{suffix}".strip()
 
 
 def _prompt_can_uuid(em, decider) -> str | None:
@@ -431,35 +450,6 @@ def cmd_add_device(
 
     em.step_divider()
 
-    # Step 4: Display name (device key is auto-generated)
-    registry_data = registry.load()
-    existing_names = {e.name.lower() for e in registry_data.devices.values()}
-    display_name = None
-    for _attempt in range(3):
-        name_input = decider.prompt_text(
-            TextPromptDecision(message="Display name (e.g., 'Octopus Pro v1.1')")
-        )
-        if not name_input:
-            em.warn("Display name cannot be empty.")
-            continue
-        if name_input.lower() in existing_names:
-            em.warn(f"You already have a device named '{name_input}'. Enter a different name.")
-            continue
-        display_name = name_input
-        break
-    if display_name is None:
-        em.error("Too many invalid inputs.")
-        return 1
-
-    # Auto-generate device key from display name
-    try:
-        device_key = generate_device_key(display_name, registry)
-    except ValueError:
-        em.error("Display name must contain at least one letter or number.")
-        return 1
-
-    em.step_divider()
-
     # Step 6: MCU type
     if is_can_transport:
         em.info("CAN", "CAN devices require manual MCU type entry")
@@ -486,6 +476,81 @@ def cmd_add_device(
     if not mcu:
         em.error("MCU type is required.")
         return 1
+
+    # Step 6.5: Board profile picker.
+    #
+    # Load the catalog once, surface any load warnings, then offer the profiles
+    # whose MCU matches AND whose transport matches this add (CAN adds show only
+    # can profiles; USB/serial adds hide can-only profiles -- mirrors the spirit
+    # of filter_flash_methods_for_device). An empty candidate list means the
+    # wizard proceeds exactly as before (zero behaviour change).
+    selected_profile = None
+    profiles, board_warnings = boards.load_catalog()
+    for warning in board_warnings:
+        em.warn(warning)
+
+    candidates = boards.profiles_for_mcu(mcu, profiles=profiles)
+    if is_can_transport:
+        candidates = [p for p in candidates if p.bootloader_method == "can"]
+    else:
+        candidates = [p for p in candidates if p.bootloader_method != "can"]
+
+    if candidates:
+        profile_choices = [
+            BoardProfileChoice(key=p.key, label=p.name, notes=_profile_notes(p))
+            for p in candidates
+        ]
+        picked = decider.choose_board_profile(
+            ChooseBoardProfileDecision(detected_mcu=mcu, choices=profile_choices)
+        )
+        if picked is None:
+            em.info("Registry", "Add device cancelled")
+            return 0
+        if picked != "other":
+            selected_profile = boards.get_profile(picked, profiles=profiles)
+            if selected_profile is not None:
+                em.info("Board", f"Using profile: {selected_profile.name}")
+            # A stale/unknown key falls through to the manual path unchanged.
+
+    em.step_divider()
+
+    # Display name (device key is auto-generated). Asked AFTER the MCU and
+    # board-profile steps so the prompt can suggest a good name: a picked
+    # profile pre-fills its display name (Enter accepts it); the manual path
+    # keeps the static example hint.
+    registry_data = registry.load()
+    existing_names = {e.name.lower() for e in registry_data.devices.values()}
+    if selected_profile is not None:
+        name_decision = TextPromptDecision(
+            message="Display name", default=selected_profile.name
+        )
+    else:
+        name_decision = TextPromptDecision(
+            message="Display name (e.g., 'Octopus Pro v1.1')"
+        )
+    display_name = None
+    for _attempt in range(3):
+        name_input = decider.prompt_text(name_decision)
+        if not name_input:
+            em.warn("Display name cannot be empty.")
+            continue
+        if name_input.lower() in existing_names:
+            em.warn(f"You already have a device named '{name_input}'. Enter a different name.")
+            continue
+        display_name = name_input
+        break
+    if display_name is None:
+        em.error("Too many invalid inputs.")
+        return 1
+
+    # Auto-generate device key from display name
+    try:
+        device_key = generate_device_key(display_name, registry)
+    except ValueError:
+        em.error("Display name must contain at least one letter or number.")
+        return 1
+
+    em.step_divider()
 
     # Step 7: Serial pattern (USB only)
     if not is_can_transport:
@@ -564,27 +629,21 @@ def cmd_add_device(
     em.step_divider()
 
     # Step 8: Flash method
-    if is_can_transport:
+    #
+    # A board profile collapses this step: bootloader_method/flash_command come
+    # straight from the profile and choose_flash_method is NOT asked. CAN adds
+    # still auto-select Katapult CAN; USB adds without a profile use the picker.
+    if selected_profile is not None:
+        bootloader_method = selected_profile.bootloader_method
+        flash_command = selected_profile.flash_command
+        pair = cast(FlashMethodPair, find_flash_method_pair(bootloader_method, flash_command))
+        em.info("Flash Method", f"{pair.name} (board profile: {selected_profile.name})")
+    elif is_can_transport:
         # CAN devices: auto-select Katapult CAN
         bootloader_method = "can"
         flash_command = "katapult_can"
         pair = cast(FlashMethodPair, find_flash_method_pair(bootloader_method, flash_command))
         em.info("Flash Method", f"Auto-selected: {pair.name}")
-
-        # CAN devices: prompt for device role (affects Flash All ordering)
-        em.info("", "")
-        em.info("Device role", "affects Flash All ordering:")
-        em.info("", "  1) Toolhead")
-        em.info("", "  2) Bridge")
-        em.info("", "  3) Skip (no role)")
-        try:
-            role_choice = decider.prompt_text(
-                TextPromptDecision(message="Select role", default="1")
-            ) or "1"
-        except (EOFError, KeyboardInterrupt):
-            role_choice = "3"
-        role_map = {"1": "toolhead", "2": "bridge", "3": None}
-        device_role = role_map.get(role_choice, "toolhead")
     else:
         result = decider.choose_flash_method(
             ChooseFlashMethodDecision(
@@ -602,6 +661,31 @@ def cmd_add_device(
         bootloader_method, flash_command = result
         pair = cast(FlashMethodPair, find_flash_method_pair(bootloader_method, flash_command))
         em.info("Flash Method", pair.name)
+
+    # Device role -- CAN only (affects Flash All ordering). The prompt default
+    # comes from the board profile's role when a profile was picked; otherwise
+    # it stays the legacy "toolhead" default. USB devices get no role.
+    if is_can_transport:
+        if selected_profile is not None:
+            default_role_choice = {"toolhead": "1", "bridge": "2"}.get(
+                selected_profile.role or "", "3"
+            )
+        else:
+            default_role_choice = "1"
+        em.info("", "")
+        em.info("Device role", "affects Flash All ordering:")
+        em.info("", "  1) Toolhead")
+        em.info("", "  2) Bridge")
+        em.info("", "  3) Skip (no role)")
+        try:
+            role_choice = decider.prompt_text(
+                TextPromptDecision(message="Select role", default=default_role_choice)
+            ) or default_role_choice
+        except (EOFError, KeyboardInterrupt):
+            role_choice = "3"
+        role_map = {"1": "toolhead", "2": "bridge", "3": None}
+        device_role = role_map.get(role_choice, "toolhead")
+    else:
         device_role = None  # USB devices: no role by default
 
     # Step 8a: Sub-field prompts (driven by pair.required_sub_fields)
@@ -609,14 +693,31 @@ def cmd_add_device(
     uf2_mount_path = None
     sdcard_board = None
     canbus_uuid = None
+    profile_sub_fields = selected_profile.sub_fields if selected_profile is not None else {}
 
     for field_key in pair.required_sub_fields:
-        # CAN transport: skip fields already set from CAN flow
+        # CAN transport: skip fields already set from CAN flow. CAN identity
+        # fields (uuid/interface) ALWAYS come from the CAN flow, never a profile.
         if is_can_transport and field_key == "canbus_uuid":
             canbus_uuid = canbus_uuid_value
             continue
         if is_can_transport and field_key == "canbus_interface":
             continue  # canbus_interface_value already set from CAN flow
+
+        # A board profile's sub_fields pre-fill BEFORE SUB_FIELD_DEFAULTS.
+        if field_key in profile_sub_fields:
+            pv = profile_sub_fields[field_key]
+            if field_key == "bootloader_baud":
+                bootloader_baud = int(pv)
+            elif field_key == "uf2_mount_path":
+                uf2_mount_path = str(pv)
+            elif field_key == "sdcard_board":
+                sdcard_board = str(pv)
+            em.info(
+                "Flash Method",
+                f"Using board profile {SUB_FIELD_PROMPTS[field_key]}: {pv}",
+            )
+            continue
 
         default = SUB_FIELD_DEFAULTS.get(field_key)
         if default is not None:
@@ -680,6 +781,7 @@ def cmd_add_device(
         flashable=is_flashable,
         mcu_name=mcu_name,
         role=device_role,
+        board=selected_profile.key if selected_profile is not None else None,
     )
     registry.add(entry)
     em.success(f"Device '{display_name}' added successfully.")
@@ -701,11 +803,29 @@ def cmd_add_device(
 
             klipper_dir = data.global_config.klipper_dir
             config_mgr = ConfigManager(device_key, klipper_dir)
-            had_cache = config_mgr.has_cached_config()
 
-            # Load or start fresh config
-            if config_mgr.load_cached_config():
-                em.info("Config", f"Loaded cached config for '{entry.name}'")
+            # Seed-load shape shared with flash_steps.load_and_validate_config and
+            # ui/menuconfig._run_menuconfig_step: with no cache yet, prefer the
+            # board profile fragment (guarded by entry.board), then fall back to
+            # the MCU default; read the seed label ONCE, then load the cache
+            # (or start fresh) with a single load_cached_config call.
+            if not config_mgr.has_cached_config():
+                if entry.board is not None:
+                    config_mgr.seed_from_board(entry.board)
+                if not config_mgr.has_cached_config():
+                    config_mgr.seed_from_default(entry.mcu)
+
+            seeded_from = config_mgr.seed_source()
+
+            if config_mgr.has_cached_config():
+                config_mgr.load_cached_config()
+                if config_mgr.is_seeded():
+                    em.info(
+                        "Config",
+                        f"Config seeded from {seeded_from or 'unknown'} -- review required",
+                    )
+                else:
+                    em.info("Config", f"Loaded cached config for '{entry.name}'")
             else:
                 config_mgr.clear_klipper_config()
                 em.info("Config", "No cached config found, starting fresh")
@@ -738,13 +858,17 @@ def cmd_add_device(
                                 em.info("Config", "menuconfig exited without saving")
                                 break
                         elif choice == "d":
-                            # Restore old cache or delete klipper .config
-                            if had_cache:
+                            # Restore the cached config if one exists NOW -- a
+                            # fresh seed counts (has_cached_config is checked at
+                            # discard time, not from a stale pre-seed snapshot).
+                            # The .seeded marker is left untouched so the seeded
+                            # cache still forces a review on the next flash.
+                            if config_mgr.has_cached_config():
                                 config_mgr.load_cached_config()
-                                em.info("Config", "Restored previous cached config")
+                                em.info("Config", "Restored cached config")
                             else:
                                 config_mgr.clear_klipper_config()
-                                em.info("Config", "Discarded config (no previous cache)")
+                                em.info("Config", "Discarded config (no cache)")
                             break
                         else:  # 'k'
                             config_mgr.save_cached_config()

@@ -35,6 +35,7 @@ _REGISTRY = {
             "name": "Octopus Pro",
             "mcu": "stm32h723",
             "serial_pattern": "usb-Klipper_stm32h723xx_ABC*",
+            "bootloader_method": "usb",
             "flash_command": "katapult",
             "mcu_name": "mcu",
             "flashable": True,
@@ -83,6 +84,29 @@ def _fake_usb():
     ]
 
 
+def _stub_config_state(monkeypatch, *, cached=True, seeded=False):
+    """Stub the three menuconfig config-state reads *consistently*.
+
+    ``has_cached_config`` / ``is_seeded`` / ``needs_review`` must stay mutually
+    consistent -- ``needs_review`` is derived (no cache OR seeded-but-unreviewed)
+    exactly as production's :func:`kflash.ui.menuconfig.needs_review`. Setting
+    them as three independent lambdas invites drift; this derives all three from
+    the two booleans that actually vary.
+    """
+    monkeypatch.setattr(dash.menuconfig, "has_cached_config", lambda key, kdir: cached)
+    monkeypatch.setattr(dash.menuconfig, "is_seeded", lambda key, kdir: seeded)
+    monkeypatch.setattr(
+        dash.menuconfig, "needs_review", lambda key, kdir: (not cached) or seeded
+    )
+    # seed_source mirrors is_seeded: a label only while seeded-but-unreviewed.
+    # Stubbed so dashboard tests never read the real ~/.config/kalico-flash.
+    monkeypatch.setattr(
+        dash.menuconfig,
+        "seed_source",
+        lambda key, kdir: "mcu-default:test" if (cached and seeded) else None,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _stub_engine_reads(monkeypatch):
     """Freeze every engine read so boot/snapshots are deterministic."""
@@ -95,10 +119,10 @@ def _stub_engine_reads(monkeypatch):
     # Never enter the sudo/suspend path in tests.
     monkeypatch.setattr(dash, "is_service_active", lambda: False)
     monkeypatch.setattr(dash, "verify_passwordless_sudo", lambda: True)
-    # Default: devices have a cached config so F offers menuconfig (never the
-    # required path that would launch the real ncurses subprocess). Tests that
-    # exercise menuconfig override these.
-    monkeypatch.setattr(dash.menuconfig, "has_cached_config", lambda key, kdir: True)
+    # Default: devices have a cached, already-reviewed, non-seeded config so F
+    # offers menuconfig (never the required path that would launch the real
+    # ncurses subprocess). Tests that exercise menuconfig override these.
+    _stub_config_state(monkeypatch, cached=True, seeded=False)
     # Fresh fetch cache per test so the 5 s Moonraker cache never leaks values
     # across tests (each test stubs its own engine reads).
     monkeypatch.setattr(dash, "_fetch_cache", {})
@@ -132,6 +156,256 @@ def test_boot_renders_devices(tmp_path) -> None:
             assert groups == ["registered", "registered", "new", "blocked"]
             # Numbers: three selectable, blocked stays 0.
             assert [r.number for r in screen._rows] == [1, 2, 3, 0]
+            # Registered rows carry the details-panel fields.
+            octopus = screen._rows[0]
+            assert octopus.bootloader_method == "usb"
+            assert octopus.role is None
+            assert octopus.has_config is True  # autouse stub: cached=True
+            assert octopus.seed_source is None  # ...and reviewed
+
+    _run(go())
+
+
+def test_seeded_device_row_shows_review_required_label(tmp_path, monkeypatch) -> None:
+    """A device whose cache is seeded-but-unreviewed shows a review-required
+    label in its row; a non-seeded cached device does not."""
+    registry = _write_registry(tmp_path)
+    monkeypatch.setattr(
+        dash.menuconfig,
+        "seed_source",
+        lambda key, kdir: "board:test" if key == "octopus" else None,
+    )
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            table = screen.query_one("#devices", DataTable)
+            octopus_index = next(
+                i for i, r in enumerate(screen._rows) if r.key == "octopus"
+            )
+            spider_index = next(
+                i for i, r in enumerate(screen._rows) if r.key == "spider"
+            )
+            octopus_cell = str(table.get_row_at(octopus_index)[1])
+            spider_cell = str(table.get_row_at(spider_index)[1])
+            assert "[review]" in octopus_cell
+            assert "[review]" not in spider_cell
+
+    _run(go())
+
+
+def test_seeded_label_clears_after_m_review_saves(tmp_path, monkeypatch) -> None:
+    """M -> review -> save clears the .seeded marker; the rebuilt row must drop
+    the 'review required' label (the saved branches refresh, not just repaint)."""
+    registry = _write_registry(tmp_path)
+    state = {"seeded": True}
+    monkeypatch.setattr(
+        dash.menuconfig,
+        "seed_source",
+        lambda key, kdir: (
+            "board:test" if key == "octopus" and state["seeded"] else None
+        ),
+    )
+
+    def fake_suspended(app, key, kdir, mcu=None, board=None):
+        state["seeded"] = False  # the user saved: save_cached_config clears .seeded
+        return _changed_result()
+
+    monkeypatch.setattr(dash.menuconfig, "run_menuconfig_suspended", fake_suspended)
+
+    def _octopus_cell(screen) -> str:
+        table = screen.query_one("#devices", DataTable)
+        index = next(i for i, r in enumerate(screen._rows) if r.key == "octopus")
+        return str(table.get_row_at(index)[1])
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            assert "[review]" in _octopus_cell(screen)
+            await pilot.press("1")
+            await pilot.press("m")
+            await pilot.pause()
+            # Close the diff receipt; its callback refreshes the device rows.
+            assert isinstance(app.screen, ConfigDiffDialog)
+            await pilot.press("enter")
+            await _pause_until(
+                pilot,
+                lambda: "[review]" not in _octopus_cell(screen),
+            )
+            assert "[review]" not in _octopus_cell(screen)
+
+    _run(go())
+
+
+def _write_board_profile(tmp_path, key: str, name: str) -> None:
+    """Drop a user board profile JSON under the (XDG-isolated) boards dir."""
+    from kflash.boards import get_user_boards_dir
+
+    boards_dir = get_user_boards_dir()
+    boards_dir.mkdir(parents=True, exist_ok=True)
+    (boards_dir / f"{key}.json").write_text(
+        json.dumps(
+            {
+                "key": key,
+                "name": name,
+                "mcu": "stm32h723",
+                "bootloader_method": "usb",
+                "flash_command": "katapult",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _registry_with_board(tmp_path, board_key: str) -> Registry:
+    reg = json.loads(json.dumps(_REGISTRY))
+    reg["devices"]["octopus"]["board"] = board_key
+    path = tmp_path / "devices.json"
+    path.write_text(json.dumps(reg), encoding="utf-8")
+    return Registry(str(path))
+
+
+def _octopus_name_cell(screen) -> str:
+    table = screen.query_one("#devices", DataTable)
+    index = next(i for i, r in enumerate(screen._rows) if r.key == "octopus")
+    return str(table.get_row_at(index)[1])
+
+
+def test_registered_row_resolves_board_name_off_the_row(tmp_path, monkeypatch) -> None:
+    """The board profile name stays OFF the Device cell (it lives in the
+    details panel) but the row object still resolves it for display."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _write_board_profile(tmp_path, "btt-x", "BTT Octopus Pro (H723)")
+    registry = _registry_with_board(tmp_path, "btt-x")
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            assert "BTT Octopus Pro (H723)" not in _octopus_name_cell(screen)
+            octopus = next(r for r in screen._rows if r.key == "octopus")
+            assert octopus.board_name == "BTT Octopus Pro (H723)"
+            spider = next(r for r in screen._rows if r.key == "spider")
+            assert spider.board_name is None
+
+    _run(go())
+
+
+def test_registered_row_board_falls_back_to_key_when_profile_missing(
+    tmp_path, monkeypatch
+) -> None:
+    """An unresolvable board key (user profile deleted) still resolves to the
+    raw key rather than vanishing."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))  # empty catalog
+    registry = _registry_with_board(tmp_path, "ghost-board")
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            octopus = next(r for r in screen._rows if r.key == "octopus")
+            assert octopus.board_name == "ghost-board"
+
+    _run(go())
+
+
+def test_device_table_never_scrolls_horizontally(tmp_path) -> None:
+    """Fixed column widths keep the table inside the 80-col panel: no
+    horizontal scrollbar (the 'grey box' from hardware feedback)."""
+    registry = _write_registry(tmp_path)
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            table = app._dashboard.query_one("#devices", DataTable)
+            assert not table.scrollbars_enabled[1]  # (vertical, horizontal)
+
+    _run(go())
+
+
+def test_details_panel_follows_cursor(tmp_path, monkeypatch) -> None:
+    """The details panel renders the highlighted device and updates on move."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _write_board_profile(tmp_path, "btt-x", "BTT Octopus Pro (H723)")
+    registry = _registry_with_board(tmp_path, "btt-x")
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            details = screen.query_one("#device-details", Static)
+            text = str(details.content)
+            assert "Octopus Pro" in text            # row 0 highlighted on boot
+            assert "Katapult USB" in text           # friendly method pair name
+            assert "BTT Octopus Pro (H723)" in text  # board name (off the row)
+            assert "cached, reviewed" in text       # autouse stub config state
+            await pilot.press("j")                  # move to the second row
+            await pilot.pause()
+            assert "Spider" in str(details.content)
+
+    _run(go())
+
+
+def test_details_panel_new_and_blocked_rows(tmp_path) -> None:
+    registry = _write_registry(tmp_path)
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            details = screen.query_one("#device-details", Static)
+            table = screen.query_one("#devices", DataTable)
+            new_index = next(
+                i for i, r in enumerate(screen._rows) if r.group == "new"
+            )
+            table.move_cursor(row=new_index)
+            await pilot.pause()
+            assert "press A to add" in str(details.content)
+            blocked_index = next(
+                i for i, r in enumerate(screen._rows) if r.group == "blocked"
+            )
+            table.move_cursor(row=blocked_index)
+            await pilot.pause()
+            assert "Blocked" in str(details.content)
+
+    _run(go())
+
+
+def test_details_panel_seeded_config_state(tmp_path, monkeypatch) -> None:
+    """A seeded-but-unreviewed device surfaces its seed label in the details."""
+    registry = _write_registry(tmp_path)
+    monkeypatch.setattr(
+        dash.menuconfig,
+        "seed_source",
+        lambda key, kdir: "board:test" if key == "octopus" else None,
+    )
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            # Row 0 is octopus (registered connected, first).
+            text = str(screen.query_one("#device-details", Static).content)
+            assert "seeded from board:test" in text
+            assert "review required" in text
 
     _run(go())
 
@@ -301,7 +575,7 @@ def test_flash_menuconfig_offer_edit_diff_continue(tmp_path, monkeypatch) -> Non
         em.success("Flashed")
         return 0
 
-    def fake_suspended(app, key, kdir):
+    def fake_suspended(app, key, kdir, mcu=None, board=None):
         calls["menuconfig_key"] = key
         return _changed_result()
 
@@ -352,7 +626,9 @@ def test_flash_menuconfig_diff_dialog_asks_to_proceed_with_flash(
 
     monkeypatch.setattr(dash, "cmd_flash", lambda *a, **k: 0)
     monkeypatch.setattr(
-        dash.menuconfig, "run_menuconfig_suspended", lambda app, k, d: _changed_result()
+        dash.menuconfig,
+        "run_menuconfig_suspended",
+        lambda app, k, d, mcu=None, board=None: _changed_result(),
     )
 
     async def go() -> None:
@@ -388,7 +664,9 @@ def test_flash_menuconfig_diff_cancel_aborts(tmp_path, monkeypatch) -> None:
         dash, "cmd_flash", lambda *a, **k: calls.setdefault("ran", True) or 0
     )
     monkeypatch.setattr(
-        dash.menuconfig, "run_menuconfig_suspended", lambda app, k, d: _changed_result()
+        dash.menuconfig,
+        "run_menuconfig_suspended",
+        lambda app, k, d, mcu=None, board=None: _changed_result(),
     )
 
     async def go() -> None:
@@ -430,7 +708,7 @@ def test_flash_menuconfig_gate_off_skips_the_offer(tmp_path, monkeypatch) -> Non
         em.success("Flashed")
         return 0
 
-    def fail_suspended(app, key, kdir):
+    def fail_suspended(app, key, kdir, mcu=None, board=None):
         raise AssertionError("menuconfig must not run when the gate is off")
 
     monkeypatch.setattr(dash, "cmd_flash", fake_cmd_flash)
@@ -474,12 +752,13 @@ def test_flash_menuconfig_gate_off_still_requires_first_config(
         em.success("Flashed")
         return 0
 
-    def fake_suspended(app, key, kdir):
+    def fake_suspended(app, key, kdir, mcu=None, board=None):
         state["cached"] = True  # menuconfig produced + cached a config
         return _changed_result()
 
     monkeypatch.setattr(dash, "cmd_flash", fake_cmd_flash)
     monkeypatch.setattr(dash.menuconfig, "has_cached_config", lambda k, d: state["cached"])
+    monkeypatch.setattr(dash.menuconfig, "needs_review", lambda k, d: not state["cached"])
     monkeypatch.setattr(dash.menuconfig, "run_menuconfig_suspended", fake_suspended)
 
     async def go() -> None:
@@ -503,6 +782,121 @@ def test_flash_menuconfig_gate_off_still_requires_first_config(
     _run(go())
 
 
+def test_flash_seeded_cache_requires_review_even_with_gate_off(
+    tmp_path, monkeypatch
+) -> None:
+    """The seeding bypass is CLOSED: a device WITH a cache but a live ``.seeded``
+    marker (needs_review True) forces menuconfig before its first flash even
+    with ``menuconfig_before_flash`` False -- a seeded config must never reach
+    build/flash without one review. Also proves the device's MCU is threaded
+    into the menuconfig helper (for the seed lookup)."""
+    registry_dict = json.loads(json.dumps(_REGISTRY))
+    registry_dict["global"]["menuconfig_before_flash"] = False
+    path = tmp_path / "devices.json"
+    path.write_text(json.dumps(registry_dict), encoding="utf-8")
+    registry = Registry(str(path))
+    calls: dict = {}
+
+    def fake_cmd_flash(reg, key, em, decider, skip_menuconfig=False):
+        calls["key"] = key
+        calls["skip"] = skip_menuconfig
+        em.success("Flashed")
+        return 0
+
+    state = {"seeded": True}
+
+    def fake_suspended(app, key, kdir, mcu=None, board=None):
+        calls["menuconfig_ran"] = True
+        calls["mcu"] = mcu
+        state["seeded"] = False  # the user saved: the .seeded marker clears
+        return _changed_result()
+
+    monkeypatch.setattr(dash, "cmd_flash", fake_cmd_flash)
+    # Cache exists, but it is seeded-and-unreviewed -> needs_review True until
+    # the review is SAVED (save_cached_config clears the marker).
+    monkeypatch.setattr(dash.menuconfig, "has_cached_config", lambda k, d: True)
+    monkeypatch.setattr(dash.menuconfig, "needs_review", lambda k, d: state["seeded"])
+    monkeypatch.setattr(dash.menuconfig, "run_menuconfig_suspended", fake_suspended)
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.press("1")
+            await pilot.press("f")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmDialog)
+            await pilot.press("y")  # confirm flash
+            await pilot.pause()
+            # No OFFER dialog: the required path runs menuconfig unconditionally
+            # (the gate-off shortcut is not taken for a seeded cache).
+            assert not isinstance(app.screen, DecisionConfirmDialog)
+            assert isinstance(app.screen, ConfigDiffDialog)
+            assert calls["menuconfig_ran"] is True
+            # Octopus is stm32h723; the MCU reached the helper for seeding.
+            assert calls["mcu"] == "stm32h723"
+            await pilot.press("y")  # Flash now
+            await _pause_until(pilot, lambda: not app.bridge.is_busy)
+            await pilot.pause()
+            assert calls["skip"] is True
+            assert isinstance(app.screen, OperationScreen)
+
+    _run(go())
+
+
+def test_flash_seeded_cache_unsaved_review_blocks_flash(tmp_path, monkeypatch) -> None:
+    """Declining/exiting the REQUIRED review of a seeded config without saving
+    must NOT flow to the flash. The cache file already exists (seeded), so a
+    guard on cache existence alone would pass and fall through to the flash;
+    the ``.seeded`` marker only clears on save, so ``needs_review`` stays True
+    after the unsaved round-trip and the flash must be blocked with a warning."""
+    registry_dict = json.loads(json.dumps(_REGISTRY))
+    registry_dict["global"]["menuconfig_before_flash"] = False
+    path = tmp_path / "devices.json"
+    path.write_text(json.dumps(registry_dict), encoding="utf-8")
+    registry = Registry(str(path))
+    calls: dict = {}
+
+    def fake_cmd_flash(*a, **k):
+        calls["flashed"] = True
+        return 0
+
+    def fake_suspended(app, key, kdir, mcu=None, board=None):
+        # The user opened menuconfig and exited WITHOUT saving: no save, no
+        # change -- and (in reality) the .seeded marker is NOT cleared.
+        calls["menuconfig_ran"] = True
+        return MenuconfigResult(ran=True, saved=False, changed=False)
+
+    monkeypatch.setattr(dash, "cmd_flash", fake_cmd_flash)
+    # Seeded cache: the file exists, but the marker never clears (unsaved), so
+    # needs_review stays True before AND after the menuconfig round-trip.
+    _stub_config_state(monkeypatch, cached=True, seeded=True)
+    monkeypatch.setattr(dash.menuconfig, "run_menuconfig_suspended", fake_suspended)
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.press("1")
+            await pilot.press("f")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmDialog)
+            await pilot.press("y")  # confirm flash -> required review runs
+            await _pause_until(pilot, lambda: app._dashboard is app.screen)
+            assert calls.get("menuconfig_ran") is True
+            # The flash was BLOCKED: no job launched, back on the dashboard
+            # with a review-required warning.
+            assert "flashed" not in calls
+            assert not app.bridge.is_busy
+            assert app._dashboard is app.screen
+            msg = app._dashboard.query_one("#status-message", Static)
+            assert "review" in str(msg.content).lower()
+
+    _run(go())
+
+
 def test_flash_menuconfig_required_when_no_cache(tmp_path, monkeypatch) -> None:
     """No cached config -> menuconfig runs unconditionally (no offer) before flash."""
     registry = _write_registry(tmp_path)
@@ -514,12 +908,13 @@ def test_flash_menuconfig_required_when_no_cache(tmp_path, monkeypatch) -> None:
         em.success("Flashed")
         return 0
 
-    def fake_suspended(app, key, kdir):
+    def fake_suspended(app, key, kdir, mcu=None, board=None):
         state["cached"] = True  # menuconfig produced + cached a config
         return _changed_result()
 
     monkeypatch.setattr(dash, "cmd_flash", fake_cmd_flash)
     monkeypatch.setattr(dash.menuconfig, "has_cached_config", lambda k, d: state["cached"])
+    monkeypatch.setattr(dash.menuconfig, "needs_review", lambda k, d: not state["cached"])
     monkeypatch.setattr(dash.menuconfig, "run_menuconfig_suspended", fake_suspended)
 
     async def go() -> None:
@@ -554,7 +949,7 @@ def test_flash_menuconfig_ctrlc_returns_to_dashboard(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(
         dash.menuconfig,
         "run_menuconfig_suspended",
-        lambda app, k, d: MenuconfigResult(ran=True, cancelled=True),
+        lambda app, k, d, mcu=None, board=None: MenuconfigResult(ran=True, cancelled=True),
     )
 
     async def go() -> None:
@@ -591,7 +986,7 @@ def test_m_opens_menuconfig_directly_for_selected_device(
     def fail_cmd_flash(*a, **k):
         raise AssertionError("M must never start a flash")
 
-    def fake_suspended(app, key, kdir):
+    def fake_suspended(app, key, kdir, mcu=None, board=None):
         calls["menuconfig_key"] = key
         return _changed_result()
 
@@ -627,7 +1022,9 @@ def test_m_reports_when_menuconfig_saves_no_changes(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(
         dash.menuconfig,
         "run_menuconfig_suspended",
-        lambda app, k, d: MenuconfigResult(ran=True, saved=False, changed=False),
+        lambda app, k, d, mcu=None, board=None: MenuconfigResult(
+            ran=True, saved=False, changed=False
+        ),
     )
 
     async def go() -> None:
@@ -654,7 +1051,7 @@ def test_m_on_unregistered_row_warns(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         dash.menuconfig,
         "run_menuconfig_suspended",
-        lambda app, k, d: calls.setdefault("ran", True) or _changed_result(),
+        lambda app, k, d, mcu=None, board=None: calls.setdefault("ran", True) or _changed_result(),
     )
 
     async def go() -> None:

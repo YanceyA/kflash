@@ -51,3 +51,42 @@ def test_save_writes_new_key_and_drops_legacy_key(tmp_path) -> None:
     raw = json.loads((tmp_path / "devices.json").read_text(encoding="utf-8"))
     assert raw["global"]["menuconfig_before_flash"] is False
     assert "skip_menuconfig" not in raw["global"]
+
+
+def test_device_board_round_trips_through_save_and_load(tmp_path) -> None:
+    from kflash.models import DeviceEntry
+
+    path = tmp_path / "devices.json"
+    registry = Registry(str(path))
+    registry.add(
+        DeviceEntry(
+            key="octopus-pro",
+            name="Octopus Pro v1.1",
+            mcu="stm32h723",
+            board="btt-octopus-pro-v1.1",
+        )
+    )
+    reloaded = registry.load()
+    assert reloaded.devices["octopus-pro"].board == "btt-octopus-pro-v1.1"
+
+
+def test_device_without_board_key_loads_as_none(tmp_path) -> None:
+    path = tmp_path / "devices.json"
+    path.write_text(
+        json.dumps(
+            {
+                "global": {},
+                "devices": {
+                    "octopus-pro": {
+                        "name": "Octopus Pro v1.1",
+                        "mcu": "stm32h723",
+                    }
+                },
+                "blocked_devices": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = Registry(str(path))
+    reloaded = registry.load()
+    assert reloaded.devices["octopus-pro"].board is None

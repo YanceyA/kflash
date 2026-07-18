@@ -64,11 +64,18 @@ class FakeRunner:
 
         self.calls = []  # list of (mode, argv-tuple)
         self.rules = []  # list of (substr, result)
+        self.line_rules = []  # list of (substr, lines)
         self.default = default if default is not None else CommandResult(0)
 
     def when(self, token, result):
         """Register a rule: argv containing exact token *token* -> *result*."""
         self.rules.append((token, result))
+        return self
+
+    def when_lines(self, token, lines):
+        """Register a rule: argv containing exact token *token* replays *lines*
+        through ``on_line`` (used by :meth:`run_streaming_lines`)."""
+        self.line_rules.append((token, lines))
         return self
 
     def _result(self, argv):
@@ -96,13 +103,38 @@ class FakeRunner:
         self.calls.append(("run", tuple(str(a) for a in argv)))
         return self._result(argv)
 
-    def run_streaming(self, argv, *, timeout, cwd=None, env=None):
-        self.calls.append(("stream", tuple(str(a) for a in argv)))
-        return self._result(argv)
-
     def run_interactive(self, argv, *, cwd=None, env=None, timeout=None):
         self.calls.append(("interactive", tuple(str(a) for a in argv)))
         return self._result(argv).returncode
+
+    def run_streaming_lines(self, argv, *, timeout, cwd=None, env=None, on_line):
+        self.calls.append(("stream_lines", tuple(str(a) for a in argv)))
+        tokens = [str(a) for a in argv]
+        for token, lines in self.line_rules:
+            if token in tokens:
+                for line in lines:
+                    on_line(line)
+                break
+        return self._result(argv)
+
+
+class RecordingSink:
+    """An EventSink that records every event so tests can assert on messages.
+
+    Canonical hoist of the four near-identical per-file copies (test_events,
+    test_flash_steps, test_command_device_add, test_command_device_manage).
+    Includes the ``text()`` helper (newline-joined event messages) that the
+    diverging copies had started to drop.
+    """
+
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event) -> None:
+        self.events.append(event)
+
+    def text(self) -> str:
+        return "\n".join(e.message or "" for e in self.events)
 
 
 class FakeDecisionProvider:
@@ -119,13 +151,17 @@ class FakeDecisionProvider:
     ``manual_calls`` for assertions.
     """
 
-    def __init__(self, confirms=None, prompts=None, manual_ready=True):
+    def __init__(
+        self, confirms=None, prompts=None, manual_ready=True, board_profile="other"
+    ):
         self.confirms = dict(confirms or {})
         self.prompts = dict(prompts or {})
         self.manual_ready = manual_ready
+        self.board_profile = board_profile
         self.confirm_calls = []
         self.prompt_calls = []
         self.manual_calls = []
+        self.board_profile_calls = []
 
     def confirm(self, req):
         self.confirm_calls.append(req)
@@ -146,6 +182,10 @@ class FakeDecisionProvider:
 
     def choose_ccache_action(self, req):
         return "skip"
+
+    def choose_board_profile(self, req):
+        self.board_profile_calls.append(req)
+        return self.board_profile
 
     def prompt_text(self, req):
         self.prompt_calls.append(req)

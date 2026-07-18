@@ -19,7 +19,7 @@ from typing import Optional
 
 import pytest
 from textual.app import App
-from textual.widgets import DataTable
+from textual.widgets import DataTable, ProgressBar, Static
 
 from kflash import events
 from kflash.events import Emitter, FlashEvent
@@ -174,6 +174,85 @@ def test_failure_hold_requires_dismissal() -> None:
             await pilot.press("enter")
             await pilot.pause()
             assert app.screen is not op
+
+    _run(go())
+
+
+def test_progress_bar_ignores_non_progress_percent_text() -> None:
+    """A ccache stats line ("100% hit rate") or any other message containing a
+    percentage must NOT move the bar -- only a structured FlashEvent.progress
+    value may. The progress panel also stays hidden."""
+
+    def stream(em: Emitter) -> int:
+        em.phase("Build", "Cache: 236 hits, 0 misses (100% hit rate)")
+        em.info("Build", "Compiling foo.c... 45%")
+        return 0
+
+    async def go() -> None:
+        app = OpBridgeApp("single", "Octopus Pro")
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            _run_stream(app, stream)
+            await _drain(pilot, app)
+            op = app.operation
+            bar = op.query_one("#op-progress", ProgressBar)
+            assert bar.progress == 0
+            panel = op.query_one("#op-progress-panel")
+            assert panel.display is False
+
+    _run(go())
+
+
+def test_progress_bar_driven_by_structured_progress_only() -> None:
+    """A real FlashEvent.progress value drives the bar and reveals the panel."""
+
+    def stream(em: Emitter) -> int:
+        em.progress("Flash", "[##] 25%", 0.25)
+        return 0
+
+    async def go() -> None:
+        app = OpBridgeApp("single", "Octopus Pro")
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            _run_stream(app, stream)
+            await _drain(pilot, app)
+            op = app.operation
+            panel = op.query_one("#op-progress-panel")
+            assert panel.display is True
+            bar = op.query_one("#op-progress", ProgressBar)
+            assert bar.progress == 25
+            label = op.query_one("#op-progress-label", Static)
+            assert "Flash: 25%" in label.render().plain  # type: ignore[union-attr]
+
+    _run(go())
+
+
+def test_progress_panel_resets_between_flash_all_devices() -> None:
+    """Flash All: a finished device's progress bar must not linger into the
+    next device's discovery/config/build phases -- device_divider resets it."""
+
+    async def go() -> None:
+        app = OpSnapshotApp("all", "3 device(s)")
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            op = pilot.app.operation
+            panel = op.query_one("#op-progress-panel")
+            bar = op.query_one("#op-progress", ProgressBar)
+
+            op.ingest(FlashEvent("progress", section="Flash", message="[##] 25%", progress=0.25))
+            await pilot.pause()
+            assert panel.display is True
+            assert bar.progress == 25
+
+            op.ingest(FlashEvent("device_divider", index=2, total=3, name="Dev B"))
+            await pilot.pause()
+            assert panel.display is False
+            assert bar.progress == 0
+
+            op.ingest(FlashEvent("progress", section="Flash", message="[##] 10%", progress=0.10))
+            await pilot.pause()
+            assert panel.display is True
+            assert bar.progress == 10
 
     _run(go())
 

@@ -26,6 +26,7 @@ message) into that screen, refreshing the device list on completion.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
 from ...blocklist import blocked_reason_for_filename, build_blocked_list
+from ...boards import load_catalog, profile_display_name
 from ...commands import cmd_flash, cmd_flash_all, cmd_remove_device
 from ...discovery import (
     extract_mcu_from_serial,
@@ -64,6 +66,7 @@ from ...service import (
     is_service_active,
     verify_passwordless_sudo,
 )
+from ...validation import find_flash_method_pair
 from .. import menuconfig
 from ..dialogs import ConfirmDialog, DecisionConfirmDialog
 from ..engine_bridge import EngineBusyError, EngineEvent, EngineJobCompleted
@@ -104,6 +107,15 @@ _LEVEL_ROLE: dict[str, str] = {
     "warning": "yellow",
     "info": "text",
 }
+
+_GIT_HASH_SUFFIX = re.compile(r"-g[0-9a-f]{6,}.*$")
+
+
+def _short_version(version: str) -> str:
+    """Drop the git-hash tail (v2026.07.00-2-g888f2672[-dirty] -> v2026.07.00-2).
+
+    Display only -- outdated-detection keeps the full string."""
+    return _GIT_HASH_SUFFIX.sub("", version)
 
 # The udev-managed directory whose mtime bumps on every USB serial hotplug.
 _SERIAL_BY_ID = "/dev/serial/by-id"
@@ -190,11 +202,52 @@ class DeviceRow:
     detail: str = ""
     canbus_uuid: Optional[str] = None
     canbus_interface: Optional[str] = None
+    config_seeded: bool = False  # cached .config was seeded, still unreviewed
+    board: Optional[str] = None  # BoardProfile key (registered devices only)
+    board_name: Optional[str] = None  # resolved profile display name (for the row)
+    bootloader_method: Optional[str] = None  # registered rows: entry value
+    role: Optional[str] = None  # toolhead | bridge | None
+    has_config: bool = False  # a cached .config exists
+    seed_source: Optional[str] = None  # seed label while unreviewed, else None
 
     @property
     def can_flash(self) -> bool:
         """Stage 1: only registered, included devices are flashable via F."""
         return self.group == "registered" and self.flashable
+
+
+def _lookup_config_state(entry, data) -> tuple[bool, Optional[str]]:
+    """Best-effort ``(has_config, seed_source)`` for a registered device row.
+
+    Mirrors ``_lookup_version``'s best-effort style: no global config (no
+    ``klipper_dir`` to look under) or an engine hiccup just means "not shown",
+    never a crashed row build. ``seed_source`` is non-``None`` only while the
+    cache is seeded-but-unreviewed (the marker clears on a menuconfig save).
+    """
+    if data.global_config is None:
+        return False, None
+    try:
+        kdir = data.global_config.klipper_dir
+        has = menuconfig.has_cached_config(entry.key, kdir)
+        return has, menuconfig.seed_source(entry.key, kdir)
+    except Exception:
+        return False, None
+
+
+def _lookup_board_name(entry, profiles) -> Optional[str]:
+    """Best-effort board-profile display name for a registered device row.
+
+    ``entry.board`` holds the profile key; resolve it to the profile's display
+    name against the pre-loaded catalog, falling back to the raw key when the
+    profile is missing (a user profile can be deleted after a device records
+    it). Devices with no board return ``None`` -- nothing to surface.
+    """
+    if not entry.board:
+        return None
+    try:
+        return profile_display_name(entry.board, profiles)
+    except Exception:
+        return entry.board
 
 
 def _lookup_version(
@@ -233,6 +286,17 @@ def build_dashboard_devices(
     blocked: list[DeviceRow] = []
     matched_filenames: set[str] = set()
 
+    # One catalog read per fetch, reused for every device's board-name lookup
+    # (best-effort: a catalog hiccup leaves board names unresolved, not crashed).
+    # Skipped entirely when no registered device carries a board, so the common
+    # case adds no board-catalog disk I/O to the 2 s/5 s background polls.
+    board_profiles = None
+    if any(entry.board for entry in data.devices.values()):
+        try:
+            board_profiles, _ = load_catalog()
+        except Exception:
+            board_profiles = None
+
     # Registered USB devices.
     for entry in data.devices.values():
         if entry.is_can_device:
@@ -246,6 +310,7 @@ def build_dashboard_devices(
             matched_filenames.add(device.filename)
         connected = len(matches) > 0
         serial = matches[0].filename if matches else (entry.serial_pattern or "")
+        has_config, seed = _lookup_config_state(entry, data)
         row = DeviceRow(
             number=0,
             key=entry.key,
@@ -257,6 +322,13 @@ def build_dashboard_devices(
             connected=connected,
             group="registered",
             flashable=entry.flashable,
+            config_seeded=seed is not None,
+            board=entry.board,
+            board_name=_lookup_board_name(entry, board_profiles),
+            bootloader_method=entry.bootloader_method,
+            role=entry.role,
+            has_config=has_config,
+            seed_source=seed,
         )
         (registered_connected if connected else registered_disconnected).append(row)
 
@@ -268,6 +340,7 @@ def build_dashboard_devices(
             connected = entry.canbus_uuid in can_status_map
         else:
             connected = True  # Moonraker unreachable: graceful default
+        has_config, seed = _lookup_config_state(entry, data)
         row = DeviceRow(
             number=0,
             key=entry.key,
@@ -281,6 +354,15 @@ def build_dashboard_devices(
             flashable=entry.flashable,
             is_can=True,
             detail=f"on {entry.canbus_interface or 'can0'}",
+            config_seeded=seed is not None,
+            board=entry.board,
+            board_name=_lookup_board_name(entry, board_profiles),
+            bootloader_method=entry.bootloader_method,
+            role=entry.role,
+            has_config=has_config,
+            seed_source=seed,
+            canbus_uuid=entry.canbus_uuid,
+            canbus_interface=entry.canbus_interface,
         )
         (registered_connected if connected else registered_disconnected).append(row)
 
@@ -467,9 +549,21 @@ class DashboardScreen(Screen[None]):
         height: auto;
         color: $kf-text;
     }
+    DashboardScreen #device-details {
+        height: 4;
+        color: $kf-text;
+    }
     """
 
-    _COLUMNS = ("#", "Device", "MCU", "Method", "Conn", "Version")
+    # Fixed column widths so the table can NEVER outgrow the 80-col panel:
+    # 74 interior − 1 slack for the vertical scrollbar (rows > max-height) −
+    # 2 padding/column → sum(widths) = 63 ≤ 63. The Method column moved to
+    # the details panel; Version strips the git-hash suffix. Without fixed
+    # widths a long serial filename or version string summons a horizontal
+    # scrollbar -- the hardware-feedback "grey box".
+    _COLUMNS: tuple[tuple[str, int], ...] = (
+        ("#", 2), ("Device", 21), ("MCU", 10), ("Conn", 9), ("Version", 21),
+    )
 
     BINDINGS = [
         ("j", "cursor_down", "Down"),
@@ -505,6 +599,8 @@ class DashboardScreen(Screen[None]):
         # handle_job_completed treats the completion as a removal (not a flash).
         self._pending_remove_key: Optional[str] = None
         self._pending_remove_name: Optional[str] = None
+        # Last fetched host version, kept for the details panel's firmware line.
+        self._host_version: Optional[str] = None
 
     @property
     def kflash_app(self) -> KflashApp:
@@ -519,12 +615,15 @@ class DashboardScreen(Screen[None]):
                 yield Static(id="status-host", classes="status-line")
             with Panel(title="devices"):
                 yield DataTable(id="devices", zebra_stripes=False, cursor_type="row")
+            with Panel(title="details"):
+                yield Static(id="device-details")
         yield HintLine(_HINTS_ROW1)
         yield HintLine(_HINTS_ROW2)
 
     def on_mount(self) -> None:
         table = self.query_one("#devices", DataTable)
-        table.add_columns(*self._COLUMNS)
+        for label, width in self._COLUMNS:
+            table.add_column(label, width=width)
         self._apply_state(
             DashboardState(status_message="Scanning devices...", loading=True)
         )
@@ -642,6 +741,7 @@ class DashboardScreen(Screen[None]):
             host.update(Text("Host: version unavailable", style=COLORS["subtle"]))
 
         if not state.loading:
+            self._host_version = state.host_version
             self._populate_table(state.devices, state.host_version)
 
     def _service_line(self, klipper: str, moonraker: str) -> Text:
@@ -686,43 +786,55 @@ class DashboardScreen(Screen[None]):
             elif prior_index is not None:
                 target = min(prior_index, len(devices) - 1)
             table.move_cursor(row=max(target, 0))
+        # RowHighlighted only fires when the cursor coordinate CHANGES; the
+        # empty-table and unchanged-index cases need this explicit refresh.
+        self._update_details()
 
     def _row_cells(self, row: DeviceRow, host_version: Optional[str]) -> list[Text]:
+        def cell(content: str, style: str) -> Text:
+            return Text(content, style=style, no_wrap=True, overflow="ellipsis")
+
         if row.group == "blocked":
             dim = f"dim {COLORS['subtle']}"
             return [
-                Text("", style=dim),
-                Text(row.name, style=dim),
-                Text("-", style=dim),
-                Text("-", style=dim),
-                Text("blocked", style=dim),
-                Text(row.detail or "-", style=dim),
+                cell("", dim),
+                cell(row.name, dim),
+                cell("-", dim),
+                cell("blocked", dim),
+                cell(row.detail or "-", dim),
             ]
 
-        number = Text(str(row.number), style=COLORS["label"])
-        if row.flashable and row.connected:
-            name = Text(row.name, style=COLORS["text"])
-        else:
-            name = Text(row.name, style=COLORS["subtle"])
-        mcu = Text(row.mcu or "-", style=COLORS["key_info"])
-        method = Text(row.method, style=COLORS["subtle"])
+        number = cell(str(row.number), COLORS["label"])
+        name_style = (
+            COLORS["text"] if row.flashable and row.connected else COLORS["subtle"]
+        )
+        name = Text(row.name, style=name_style, no_wrap=True, overflow="ellipsis")
+        if row.config_seeded:
+            name.append(" ")
+            name.append("[review]", style=COLORS["orange"])
+        mcu = cell(row.mcu or "-", COLORS["key_info"])
 
         if row.group == "new":
-            conn = Text("new", style=COLORS["orange"])
+            conn = cell("new", COLORS["orange"])
         elif not row.connected:
-            conn = Text("offline", style=COLORS["subtle"])
+            conn = cell("offline", COLORS["subtle"])
         elif not row.flashable:
-            conn = Text("excluded", style=COLORS["orange"])
+            conn = cell("excluded", COLORS["orange"])
         else:
-            conn = Text("connected", style=COLORS["green"])
+            conn = cell("connected", COLORS["green"])
 
         version = self._version_cell(row, host_version)
-        return [number, name, mcu, method, conn, version]
+        return [number, name, mcu, conn, version]
 
     def _version_cell(self, row: DeviceRow, host_version: Optional[str]) -> Text:
         if not row.version:
             return Text("-", style=COLORS["subtle"])
-        text = Text(row.version, style=COLORS["subtle"])
+        text = Text(
+            _short_version(row.version),
+            style=COLORS["subtle"],
+            no_wrap=True,
+            overflow="ellipsis",
+        )
         text.append("  ")
         if host_version:
             kind = "warn" if is_mcu_outdated(host_version, row.version) else "ok"
@@ -737,6 +849,108 @@ class DashboardScreen(Screen[None]):
         if index is None or not (0 <= index < len(self._rows)):
             return None
         return self._rows[index]
+
+    # -- details panel ---------------------------------------------------- #
+    def on_data_table_row_highlighted(
+        self, event: DataTable.RowHighlighted
+    ) -> None:
+        self._update_details()
+
+    def _update_details(self) -> None:
+        self.query_one("#device-details", Static).update(
+            self._details_text(self._selected_row())
+        )
+
+    def _details_text(self, row: Optional[DeviceRow]) -> Text:
+        """Four fixed lines describing the highlighted device row."""
+        lines: list[Text] = []
+
+        def kv(label: str, value: str, value_style: str = COLORS["value"]) -> Text:
+            text = Text(no_wrap=True, overflow="ellipsis")
+            text.append(f"{label}: ", style=COLORS["label"])
+            text.append(value, style=value_style)
+            return text
+
+        if row is None:
+            lines.append(Text("No device selected.", style=COLORS["subtle"]))
+        elif row.group == "new":
+            lines.append(
+                Text(row.name, style=COLORS["text"], no_wrap=True,
+                     overflow="ellipsis")
+            )
+            lines.append(kv("Serial", row.serial_path or "-", COLORS["subtle"]))
+            lines.append(
+                Text("Not registered — press A to add", style=COLORS["orange"])
+            )
+        elif row.group == "blocked":
+            lines.append(
+                Text(row.name, style=COLORS["subtle"], no_wrap=True,
+                     overflow="ellipsis")
+            )
+            lines.append(kv("Blocked", row.detail or "unsupported device",
+                            COLORS["subtle"]))
+        else:  # registered
+            title = Text(no_wrap=True, overflow="ellipsis")
+            title.append(row.name, style=COLORS["text"])
+            title.append("    ")
+            title.append(row.board_name or "no board profile",
+                         style=COLORS["subtle"])
+            lines.append(title)
+
+            if row.is_can:
+                lines.append(kv(
+                    "CAN",
+                    f"{row.canbus_uuid or '-'} on {row.canbus_interface or 'can0'}",
+                    COLORS["subtle"],
+                ))
+            else:
+                lines.append(kv("Serial", row.serial_path or "-", COLORS["subtle"]))
+
+            pair = find_flash_method_pair(
+                row.bootloader_method, None if row.method == "-" else row.method
+            )
+            method_line = kv("Method", pair.name if pair else row.method)
+            method_line.append("    ")
+            method_line.append("Role: ", style=COLORS["label"])
+            method_line.append(row.role or "-", style=COLORS["subtle"])
+            lines.append(method_line)
+
+            if row.seed_source:
+                config_line = kv(
+                    "Config", f"seeded from {row.seed_source} — review required",
+                    COLORS["orange"],
+                )
+            elif row.has_config:
+                config_line = kv("Config", "cached, reviewed", COLORS["text"])
+            else:
+                config_line = kv("Config", "none — press M to configure",
+                                 COLORS["subtle"])
+            config_line.append("    ")
+            config_line.append("Firmware: ", style=COLORS["label"])
+            if row.version:
+                config_line.append(_short_version(row.version) + " ",
+                                   style=COLORS["subtle"])
+                if self._host_version:
+                    kind = (
+                        "warn"
+                        if is_mcu_outdated(self._host_version, row.version)
+                        else "ok"
+                    )
+                else:
+                    kind = "caution"
+                config_line.append_text(status_marker(kind))
+            else:
+                config_line.append("-", style=COLORS["subtle"])
+            lines.append(config_line)
+
+        while len(lines) < 4:
+            lines.append(Text(""))
+        result = Text()
+        for index, line in enumerate(lines[:4]):
+            if index:
+                result.append("\n")
+            result.append_text(line)
+        return result
 
     # -- navigation ------------------------------------------------------ #
     def action_cursor_down(self) -> None:
@@ -774,11 +988,11 @@ class DashboardScreen(Screen[None]):
                 "warning",
             )
             return
-        key, name = row.key, row.name
+        key, name, mcu, board = row.key, row.name, row.mcu, row.board
 
         def _after_confirm(confirmed: Optional[bool]) -> None:
             if confirmed:
-                self._menuconfig_gate(key, name)
+                self._menuconfig_gate(key, name, mcu, board)
             else:
                 self._set_status(f"Flash cancelled for {name}.", "info")
 
@@ -797,17 +1011,24 @@ class DashboardScreen(Screen[None]):
         config = self._global_config()
         return None if config is None else config.klipper_dir
 
-    def _menuconfig_gate(self, key: str, name: str) -> None:
+    def _menuconfig_gate(
+        self, key: str, name: str, mcu: Optional[str], board: Optional[str] = None
+    ) -> None:
         """Between the F confirm and the flash, run/offer menuconfig (§6).
 
-        A device with a cached ``.config`` is *offered* menuconfig (declining
-        flashes the cached config as before) -- unless the
+        A device with a cached, already-reviewed ``.config`` is *offered*
+        menuconfig (declining flashes the cached config as before) -- unless the
         ``menuconfig_before_flash`` setting (default ON) is off, in which case
-        the cached config flashes directly with no prompt. A device with no
-        cached config *requires* menuconfig before its first flash regardless
-        of the setting -- mirroring what ``cmd_flash`` would otherwise do on
-        the worker thread (which cannot host the ncurses subprocess); MCU
-        validation still happens engine-side during the flash job.
+        the cached config flashes directly with no prompt. A device that
+        *needs review* -- no cached config, OR a seeded-but-unreviewed cache --
+        *requires* menuconfig before its first flash regardless of the setting.
+        This closes the seeding bypass: a seeded config makes
+        ``has_cached_config`` true, so the gate must key off
+        :func:`menuconfig.needs_review` (not the raw cache check) or a seeded
+        config would silently flash without one review when the setting is off.
+        Mirrors what ``cmd_flash`` would otherwise do on the worker thread
+        (which cannot host the ncurses subprocess); MCU validation still happens
+        engine-side during the flash job.
         """
         config = self._global_config()
         if config is None:
@@ -815,14 +1036,16 @@ class DashboardScreen(Screen[None]):
             self._start_flash(key, name)
             return
         klipper_dir = config.klipper_dir
-        if menuconfig.has_cached_config(key, klipper_dir):
+        if not menuconfig.needs_review(key, klipper_dir):
             if not config.menuconfig_before_flash:
                 self._start_flash(key, name)
                 return
 
             def _after_offer(edit: Optional[bool]) -> None:
                 if edit:
-                    self._run_menuconfig(key, name, klipper_dir, required=False)
+                    self._run_menuconfig(
+                        key, name, klipper_dir, mcu=mcu, board=board, required=False
+                    )
                 else:
                     self._start_flash(key, name)
 
@@ -835,7 +1058,9 @@ class DashboardScreen(Screen[None]):
                 _after_offer,
             )
         else:
-            self._run_menuconfig(key, name, klipper_dir, required=True)
+            self._run_menuconfig(
+                key, name, klipper_dir, mcu=mcu, board=board, required=True
+            )
 
     def action_menuconfig(self) -> None:
         """M: open menuconfig directly for the selected device -- no flash.
@@ -863,7 +1088,9 @@ class DashboardScreen(Screen[None]):
             self._set_status("Klipper directory not configured (C).", "error")
             return
         key, name = row.key, row.name
-        result = menuconfig.run_menuconfig_suspended(self.app, key, klipper_dir)
+        result = menuconfig.run_menuconfig_suspended(
+            self.app, key, klipper_dir, row.mcu, row.board
+        )
         if result.cancelled:
             self._set_status(f"menuconfig cancelled for {name}.", "info")
             return
@@ -873,7 +1100,9 @@ class DashboardScreen(Screen[None]):
         if result.changed:
 
             def _after_receipt(_val: Optional[bool]) -> None:
-                self._set_status(
+                # refresh (not just a status repaint): a save clears the
+                # .seeded marker, so the row's seeded label must rebuild.
+                self.refresh_devices(
                     f"Config updated for {name} "
                     f"({result.lines_changed} lines changed).",
                     "success",
@@ -884,13 +1113,23 @@ class DashboardScreen(Screen[None]):
                 _after_receipt,
             )
         else:
-            self._set_status(f"menuconfig saved no changes for {name}.", "info")
+            # A no-diff save still clears the .seeded marker: rebuild rows.
+            self.refresh_devices(f"menuconfig saved no changes for {name}.", "info")
 
     def _run_menuconfig(
-        self, key: str, name: str, klipper_dir: str, *, required: bool
+        self,
+        key: str,
+        name: str,
+        klipper_dir: str,
+        *,
+        mcu: Optional[str] = None,
+        board: Optional[str] = None,
+        required: bool,
     ) -> None:
         """Suspend, run menuconfig, then show the diff receipt or proceed."""
-        result = menuconfig.run_menuconfig_suspended(self.app, key, klipper_dir)
+        result = menuconfig.run_menuconfig_suspended(
+            self.app, key, klipper_dir, mcu, board
+        )
         if result.cancelled:
             self.refresh_devices(
                 f"menuconfig cancelled; flash aborted for {name}.", "warning"
@@ -899,11 +1138,20 @@ class DashboardScreen(Screen[None]):
         if result.error:
             self.refresh_devices(f"menuconfig failed: {result.error}", "error")
             return
-        if required and not menuconfig.has_cached_config(key, klipper_dir):
-            self.refresh_devices(
-                f"No config saved for {name}; a flash needs a saved config.",
-                "warning",
-            )
+        if required and menuconfig.needs_review(key, klipper_dir):
+            # Still review-required after the round-trip: either no config was
+            # saved at all, or a SEEDED cache was opened but exited without
+            # saving (the .seeded marker only clears on save). Guarding on
+            # needs_review -- not bare cache existence -- keeps an unreviewed
+            # seed from falling through to the flash below.
+            if menuconfig.has_cached_config(key, klipper_dir):
+                message = (
+                    f"Config for {name} still needs review; save it in "
+                    "menuconfig before flashing."
+                )
+            else:
+                message = f"No config saved for {name}; a flash needs a saved config."
+            self.refresh_devices(message, "warning")
             return
         if result.changed:
 
@@ -1052,6 +1300,9 @@ class DashboardScreen(Screen[None]):
         if message.cancelled:
             self.refresh_devices("Flash cancelled.", "warning")
         elif message.ok and message.result == 0:
+            # Only flash / flash-all jobs reach here: remove jobs return early
+            # above, and config (save-as-default / copy) jobs are routed to the
+            # device-config screen's own handler -- so "Flash" is accurate.
             self.refresh_devices("Flash completed successfully.", "success")
         else:
             self.refresh_devices("Flash failed. See the operation screen.", "error")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 
 import pytest
 from conftest import FakeRunner
@@ -27,10 +28,12 @@ def test_set_runner_routes_free_functions_to_fake():
 def test_monkeypatch_active(monkeypatch):
     fake = FakeRunner()
     monkeypatch.setattr(runner, "_active", fake)
-    runner.run_streaming(["make", "clean"], timeout=5)
     runner.run_interactive(["sudo", "-v"], timeout=5)
-    assert fake.count(mode="stream") == 1
+    runner.run_streaming_lines(
+        ["make", "clean"], timeout=5, on_line=lambda line: None
+    )
     assert fake.count(mode="interactive") == 1
+    assert fake.count(mode="stream_lines") == 1
 
 
 def test_fakerunner_rule_matching():
@@ -64,7 +67,7 @@ def test_subprocess_runner_interactive_returns_code():
 
 
 # --- Divergent timeout contract (Runner Protocol docstring) ----------------
-# run / run_streaming NEVER raise TimeoutExpired -> timed_out=True.
+# run / run_streaming_lines NEVER raise TimeoutExpired -> timed_out=True.
 # run_interactive DOES raise TimeoutExpired (its int return can't carry a flag).
 
 
@@ -80,18 +83,122 @@ def test_run_timeout_returns_flag_with_decoded_partial_output():
     assert "partial" in res.stdout
 
 
-def test_run_streaming_timeout_returns_flag_not_raises():
-    r = SubprocessRunner()
-    res = r.run_streaming(
-        [sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3
-    )
-    assert res.timed_out is True
-    assert res.returncode != 0
-
-
 def test_run_interactive_timeout_raises():
     r = SubprocessRunner()
     with pytest.raises(subprocess.TimeoutExpired):
         r.run_interactive(
             [sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3
         )
+
+
+# --- run_streaming_lines ----------------------------------------------------
+
+
+def test_run_streaming_lines_delivers_lines_in_order():
+    r = SubprocessRunner()
+    script = "print('one'); print('two'); print('three')"
+    received = []
+    res = r.run_streaming_lines(
+        [sys.executable, "-c", script], timeout=15, on_line=received.append
+    )
+    assert received == ["one", "two", "three"]
+    assert "one" in res.stdout and "two" in res.stdout and "three" in res.stdout
+    assert res.returncode == 0
+    assert not res.timed_out
+
+
+def test_run_streaming_lines_returncode_passthrough_nonzero():
+    r = SubprocessRunner()
+    script = "print('boom'); raise SystemExit(3)"
+    received = []
+    res = r.run_streaming_lines(
+        [sys.executable, "-c", script], timeout=15, on_line=received.append
+    )
+    assert received == ["boom"]
+    assert res.returncode == 3
+    assert not res.timed_out
+
+
+def test_run_streaming_lines_merges_stderr():
+    r = SubprocessRunner()
+    script = (
+        "import sys; "
+        "print('from-stdout'); "
+        "print('from-stderr', file=sys.stderr)"
+    )
+    received = []
+    res = r.run_streaming_lines(
+        [sys.executable, "-c", script], timeout=15, on_line=received.append
+    )
+    assert set(received) == {"from-stdout", "from-stderr"}
+    assert res.returncode == 0
+
+
+def test_run_streaming_lines_timeout_returns_flag_not_raises():
+    r = SubprocessRunner()
+    script = (
+        "print('early', flush=True); "
+        "import time; time.sleep(30)"
+    )
+    received = []
+    res = r.run_streaming_lines(
+        [sys.executable, "-c", script], timeout=1, on_line=received.append
+    )
+    assert res.timed_out is True
+    assert "early" in received
+    assert "early" in res.stdout
+
+
+def test_run_streaming_lines_on_line_exception_reaps_child():
+    r = SubprocessRunner()
+    # Long sleep after the first flushed line -- if the child weren't killed
+    # promptly on the on_line exception, this test would take ~30s to return.
+    script = "print('one', flush=True); import time; time.sleep(30)"
+
+    def boom(line):
+        raise RuntimeError("boom")
+
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="boom"):
+        r.run_streaming_lines([sys.executable, "-c", script], timeout=20, on_line=boom)
+    elapsed = time.monotonic() - start
+    assert elapsed < 10  # child killed+reaped promptly, not left running for the sleep
+
+    # The runner is still healthy for a subsequent call (no leaked state).
+    received = []
+    res = r.run_streaming_lines(
+        [sys.executable, "-c", "print('still-fine')"],
+        timeout=15,
+        on_line=received.append,
+    )
+    assert received == ["still-fine"]
+    assert res.returncode == 0
+
+
+def test_run_streaming_lines_replaces_invalid_utf8_bytes():
+    r = SubprocessRunner()
+    script = (
+        "import sys; "
+        "sys.stdout.buffer.write(b'\\xff\\xfe bad\\n'); "
+        "sys.stdout.flush()"
+    )
+    received = []
+    res = r.run_streaming_lines(
+        [sys.executable, "-c", script], timeout=5, on_line=received.append
+    )
+    assert res.timed_out is False
+    assert len(received) == 1
+    assert "bad" in received[0]
+    assert "�" in received[0]  # replacement char in place of the bad bytes
+
+
+def test_fakerunner_when_lines_replays_through_on_line():
+    fake = FakeRunner()
+    fake.when_lines("flashtool.py", ["line one", "line two"])
+    received = []
+    res = fake.run_streaming_lines(
+        ["python3", "flashtool.py", "-f"], timeout=5, on_line=received.append
+    )
+    assert received == ["line one", "line two"]
+    assert res.returncode == 0
+    assert fake.count(mode="stream_lines") == 1

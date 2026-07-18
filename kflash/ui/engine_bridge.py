@@ -80,6 +80,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label
 
 from ..decisions import (
+    ChooseBoardProfileDecision,
     ChooseCcacheActionDecision,
     ChooseDeviceDecision,
     ChooseFlashMethodDecision,
@@ -339,7 +340,7 @@ class TextPromptModal(ModalScreen[Optional[str]]):
             self.dismiss(None)
 
 
-# The seven typed decision requests the engine can raise.
+# The typed decision requests the engine can raise.
 DecisionRequest = Any
 
 
@@ -417,6 +418,17 @@ def default_modal_factory(request: DecisionRequest) -> ModalScreen:
                 ("disable", "Disable ccache permanently"),
             ],
             allow_cancel=False,
+        )
+
+    if isinstance(request, ChooseBoardProfileDecision):
+        board_options: list[tuple[Any, str]] = [
+            (choice.key, choice.label) for choice in request.choices
+        ]
+        board_options.append(("other", "Other (manual setup)"))
+        return ChoiceModal(
+            f"Select a board profile (detected MCU: {request.detected_mcu})",
+            board_options,
+            allow_cancel=True,
         )
 
     if isinstance(request, TextPromptDecision):
@@ -619,7 +631,7 @@ class UiDecisionProvider:
         decision.modal = modal
         self._app.push_screen(modal, decision.set_result)
 
-    # -- DecisionProvider protocol (7 methods) -------------------------- #
+    # -- DecisionProvider protocol (8 methods) -------------------------- #
     def confirm(self, req: ConfirmDecision) -> bool:
         return bool(self._ask(req))
 
@@ -642,6 +654,10 @@ class UiDecisionProvider:
     def choose_ccache_action(self, req: ChooseCcacheActionDecision) -> str:
         result = self._ask(req)
         return result if result in ("install", "skip", "disable") else "skip"
+
+    def choose_board_profile(self, req: ChooseBoardProfileDecision) -> Optional[str]:
+        result = self._ask(req)
+        return None if result is None else str(result)
 
     def prompt_text(self, req: TextPromptDecision) -> Optional[str]:
         result = self._ask(req)

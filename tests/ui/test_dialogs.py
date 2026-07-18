@@ -17,6 +17,8 @@ from typing import Callable
 from textual.app import App
 
 from kflash.decisions import (
+    BoardProfileChoice,
+    ChooseBoardProfileDecision,
     ChooseCcacheActionDecision,
     ChooseDeviceDecision,
     ChooseFlashMethodDecision,
@@ -28,6 +30,7 @@ from kflash.decisions import (
 )
 from kflash.ui import skin
 from kflash.ui.dialogs import (
+    BoardProfileDialog,
     ChoiceDialog,
     DecisionConfirmDialog,
     FlashMethodDialog,
@@ -323,6 +326,64 @@ def test_flash_method_round_trip_selects_pair() -> None:
     assert result == ("none", "make_flash")
 
 
+# --------------------------------------------------------------------------- #
+# ChooseBoardProfileDecision -> BoardProfileDialog (numbered pick / O / Esc)
+# --------------------------------------------------------------------------- #
+def _board_request() -> ChooseBoardProfileDecision:
+    return ChooseBoardProfileDecision(
+        detected_mcu="stm32h723",
+        choices=[
+            BoardProfileChoice(
+                key="btt-octopus-pro-h723",
+                label="BTT Octopus Pro v1.0/1.1 (STM32H723)",
+                notes="128KB bootloader, 25MHz crystal",
+            ),
+            BoardProfileChoice(
+                key="btt-octopus-pro-h723-can",
+                label="BTT Octopus Pro (STM32H723, CAN bridge)",
+                notes="USB-to-CAN bridge",
+            ),
+        ],
+    )
+
+
+def test_board_profile_number_pick_returns_key() -> None:
+    result = _drive(
+        lambda b: (lambda: b.decisions.choose_board_profile(_board_request())),
+        ["2", "enter"],
+        BoardProfileDialog,
+    )
+    assert result == "btt-octopus-pro-h723-can"
+
+
+def test_board_profile_o_returns_other() -> None:
+    result = _drive(
+        lambda b: (lambda: b.decisions.choose_board_profile(_board_request())),
+        ["o"],
+        BoardProfileDialog,
+    )
+    assert result == "other"
+
+
+def test_board_profile_escape_returns_none() -> None:
+    result = _drive(
+        lambda b: (lambda: b.decisions.choose_board_profile(_board_request())),
+        ["escape"],
+        BoardProfileDialog,
+    )
+    assert result is None
+
+
+def test_board_profile_dialog_shows_detected_mcu_and_other() -> None:
+    dialog = BoardProfileDialog(_board_request())
+    labels = [label for _value, label in dialog._options]
+    values = [value for value, _label in dialog._options]
+    # Detected MCU surfaced in the prompt; manual-setup escape hatch appended.
+    assert "stm32h723" in dialog._prompt
+    assert "other" in values
+    assert labels[0] == "BTT Octopus Pro v1.0/1.1 (STM32H723)"
+
+
 def test_styled_factory_covers_every_request() -> None:
     from kflash.ui.dialogs import ManualBootloaderDialog as _MBD
 
@@ -334,8 +395,16 @@ def test_styled_factory_covers_every_request() -> None:
         McuMismatchDecision("a", "b", "B"),
         ChooseCcacheActionDecision(),
         TextPromptDecision(message="m"),
+        ChooseBoardProfileDecision(detected_mcu="rp2040", choices=[]),
     ]
-    types = {DecisionConfirmDialog, ChoiceDialog, FlashMethodDialog, _MBD, TextPromptDialog}
+    types = {
+        DecisionConfirmDialog,
+        ChoiceDialog,
+        FlashMethodDialog,
+        BoardProfileDialog,
+        _MBD,
+        TextPromptDialog,
+    }
     produced = {type(styled_modal_factory(r)) for r in reqs}
     # FlashMethodDialog subclasses ChoiceDialog; every request maps to a dialog.
     assert produced <= types | {ChoiceDialog}

@@ -401,7 +401,7 @@ def cmd_flash_all(registry, em: Emitter, decider: DecisionProvider) -> int:
             config_mgr = ConfigManager(entry.key, klipper_dir)
             config_mgr.load_cached_config()
 
-            build_result = run_build(klipper_dir, quiet=True, use_ccache=use_ccache)
+            build_result = run_build(klipper_dir, use_ccache=use_ccache)
 
             if build_result.success:
                 artifact_error, artifact_warning = check_firmware_artifact(

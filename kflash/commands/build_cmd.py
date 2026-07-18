@@ -13,6 +13,7 @@ from ..events import Emitter
 from ..flash_steps import load_and_validate_config
 from ..preflight import preflight_build
 from ..registry import Registry
+from ._common import emit_output_tail
 
 
 def cmd_build(
@@ -65,6 +66,7 @@ def cmd_build(
     result = run_build(klipper_dir)
 
     if not result.success:
+        emit_output_tail(em, result.error_output)
         template = ERROR_TEMPLATES["build_failed"]
         em.error_with_recovery(
             template["error_type"],

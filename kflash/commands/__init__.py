@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from .build_cmd import cmd_build
 from .device_add import cmd_add_device
-from .device_manage import cmd_list_devices, cmd_remove_device
+from .device_manage import (
+    cmd_copy_config,
+    cmd_list_devices,
+    cmd_remove_device,
+    cmd_save_config_as_default,
+)
 from .flash_batch import cmd_flash_all
 from .flash_single import cmd_flash
 
@@ -20,4 +25,6 @@ __all__ = [
     "cmd_remove_device",
     "cmd_list_devices",
     "cmd_build",
+    "cmd_save_config_as_default",
+    "cmd_copy_config",
 ]

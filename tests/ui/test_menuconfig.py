@@ -48,6 +48,16 @@ def _seed_cache(monkeypatch, tmp_path, device_key: str, text: str) -> ConfigMana
     return mgr
 
 
+def test_seed_source_reads_marker_label(monkeypatch, tmp_path) -> None:
+    """menuconfig.seed_source surfaces the ConfigManager marker label; a device
+    with no marker (or no cache at all) reads as None."""
+    mgr = _seed_cache(monkeypatch, tmp_path, "dev1", "CONFIG_X=y\n")
+    mgr.seed_marker_path.write_text("board:test-board\n", encoding="utf-8")
+
+    assert menuconfig.seed_source("dev1", str(mgr.klipper_dir)) == "board:test-board"
+    assert menuconfig.seed_source("other", str(mgr.klipper_dir)) is None
+
+
 def test_step_diffs_cached_config_after_menuconfig(monkeypatch, tmp_path) -> None:
     mgr = _seed_cache(
         monkeypatch, tmp_path, "octopus", "CONFIG_A=y\nCONFIG_B=n\n"
@@ -76,6 +86,257 @@ def test_step_diffs_cached_config_after_menuconfig(monkeypatch, tmp_path) -> Non
     assert "+CONFIG_C=y" in rendered
     # The saved config was written back to the per-device cache.
     assert "CONFIG_C=y" in mgr.cache_path.read_text(encoding="utf-8")
+
+
+def test_step_seeds_from_default_and_diffs_only_user_edits(
+    monkeypatch, tmp_path
+) -> None:
+    """No cache + an MCU default present -> the step seeds first, then diffs
+    the user's edits on TOP of the seed (the ``before`` snapshot is post-seed)."""
+    from kflash.config import get_defaults_dir
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    klipper_dir = tmp_path / "klipper"
+    klipper_dir.mkdir()
+    # An MCU default seed exists; the device itself has no cache yet.
+    defaults = get_defaults_dir()
+    defaults.mkdir(parents=True, exist_ok=True)
+    (defaults / "stm32h723.config").write_text(
+        'CONFIG_MCU="stm32h723"\nCONFIG_SEED=y\n', encoding="utf-8"
+    )
+
+    def fake_run_menuconfig(kdir, config_path):
+        # The seed is loaded into the klipper tree; the user adds one line.
+        from pathlib import Path
+
+        p = Path(config_path)
+        p.write_text(p.read_text(encoding="utf-8") + "CONFIG_USER_EDIT=y\n", encoding="utf-8")
+        return 0, True
+
+    monkeypatch.setattr(menuconfig, "run_menuconfig", fake_run_menuconfig)
+
+    result = _run_menuconfig_step("octopus", str(klipper_dir), mcu="stm32h723")
+
+    assert result.ran is True
+    assert result.saved is True
+    assert result.changed is True
+    assert result.seeded_from == "mcu-default:stm32h723"
+    # The diff's "before" is the SEEDED cache: only the user's added line shows;
+    # the seed body must NOT render as spurious additions.
+    rendered = "\n".join(seg.plain for seg in result.diff_lines)
+    assert "+CONFIG_USER_EDIT=y" in rendered
+    assert "+CONFIG_SEED=y" not in rendered
+    assert result.lines_changed == 1
+    # The saved cache carries both the seed and the user's edit.
+    mgr = ConfigManager("octopus", str(klipper_dir))
+    saved = mgr.cache_path.read_text(encoding="utf-8")
+    assert "CONFIG_SEED=y" in saved
+    assert "CONFIG_USER_EDIT=y" in saved
+
+
+def test_step_prefers_board_fragment_over_mcu_default(monkeypatch, tmp_path) -> None:
+    """First-flash seeding prefers the board profile fragment (when a board key
+    is threaded) over the MCU default, and records the board:<key> source."""
+    import json
+
+    from kflash.boards import get_user_boards_dir
+    from kflash.config import get_defaults_dir
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    klipper_dir = tmp_path / "klipper"
+    klipper_dir.mkdir()
+
+    defaults = get_defaults_dir()
+    defaults.mkdir(parents=True, exist_ok=True)
+    (defaults / "stm32h723.config").write_text(
+        'CONFIG_MCU="stm32h723"\nCONFIG_FROM_DEFAULT=y\n', encoding="utf-8"
+    )
+    boards_dir = get_user_boards_dir()
+    boards_dir.mkdir(parents=True, exist_ok=True)
+    (boards_dir / "btt-x.json").write_text(
+        json.dumps(
+            {
+                "key": "btt-x",
+                "name": "BTT X",
+                "mcu": "stm32h723",
+                "bootloader_method": "usb",
+                "flash_command": "katapult",
+                "config_fragment": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (boards_dir / "btt-x.config").write_text(
+        'CONFIG_MCU="stm32h723"\nCONFIG_FROM_BOARD=y\n', encoding="utf-8"
+    )
+
+    monkeypatch.setattr(menuconfig, "run_menuconfig", lambda kdir, cfg: (0, False))
+
+    result = _run_menuconfig_step(
+        "octopus", str(klipper_dir), mcu="stm32h723", board="btt-x"
+    )
+
+    assert result.seeded_from == "board:btt-x"
+    mgr = ConfigManager("octopus", str(klipper_dir))
+    seeded = mgr.cache_path.read_text(encoding="utf-8")
+    assert "CONFIG_FROM_BOARD" in seeded
+    assert "CONFIG_FROM_DEFAULT" not in seeded
+
+
+def test_step_flags_fragment_drift_when_seed_symbol_dropped(
+    monkeypatch, tmp_path
+) -> None:
+    """A board fragment whose CONFIG_ symbol vanishes from the saved config (an
+    upstream rename kconfiglib dropped on load) surfaces as a drift warning."""
+    import json
+
+    from kflash.boards import get_user_boards_dir
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    klipper_dir = tmp_path / "klipper"
+    klipper_dir.mkdir()
+
+    boards_dir = get_user_boards_dir()
+    boards_dir.mkdir(parents=True, exist_ok=True)
+    (boards_dir / "btt-x.json").write_text(
+        json.dumps(
+            {
+                "key": "btt-x",
+                "name": "BTT X",
+                "mcu": "stm32h723",
+                "bootloader_method": "usb",
+                "flash_command": "katapult",
+                "config_fragment": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (boards_dir / "btt-x.config").write_text(
+        "CONFIG_MACH_STM32=y\nCONFIG_STM32_FLASH_START_20200=y\n", encoding="utf-8"
+    )
+
+    def fake_run_menuconfig(kdir, config_path):
+        # Simulate kconfiglib dropping the renamed symbol on load: the offset
+        # symbol is gone; the default (differently named) one takes its place.
+        from pathlib import Path
+
+        Path(config_path).write_text(
+            "CONFIG_MACH_STM32=y\nCONFIG_STM32_FLASH_START_20000=y\n", encoding="utf-8"
+        )
+        return 0, True
+
+    monkeypatch.setattr(menuconfig, "run_menuconfig", fake_run_menuconfig)
+
+    result = _run_menuconfig_step(
+        "octopus", str(klipper_dir), mcu="stm32h723", board="btt-x"
+    )
+
+    assert result.seeded_from == "board:btt-x"
+    assert result.drift_warnings == ["CONFIG_STM32_FLASH_START_20200=y"]
+
+
+def test_step_no_drift_when_fragment_survives(monkeypatch, tmp_path) -> None:
+    """A board fragment whose symbols all survive the round-trip reports no drift."""
+    import json
+
+    from kflash.boards import get_user_boards_dir
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    klipper_dir = tmp_path / "klipper"
+    klipper_dir.mkdir()
+
+    boards_dir = get_user_boards_dir()
+    boards_dir.mkdir(parents=True, exist_ok=True)
+    (boards_dir / "btt-x.json").write_text(
+        json.dumps(
+            {
+                "key": "btt-x",
+                "name": "BTT X",
+                "mcu": "stm32h723",
+                "bootloader_method": "usb",
+                "flash_command": "katapult",
+                "config_fragment": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (boards_dir / "btt-x.config").write_text(
+        "CONFIG_MACH_STM32=y\n", encoding="utf-8"
+    )
+
+    def fake_run_menuconfig(kdir, config_path):
+        from pathlib import Path
+
+        Path(config_path).write_text(
+            "CONFIG_MACH_STM32=y\nCONFIG_USB=y\n", encoding="utf-8"
+        )
+        return 0, True
+
+    monkeypatch.setattr(menuconfig, "run_menuconfig", fake_run_menuconfig)
+
+    result = _run_menuconfig_step(
+        "octopus", str(klipper_dir), mcu="stm32h723", board="btt-x"
+    )
+
+    assert result.drift_warnings == []
+
+
+def test_receipt_surfaces_fragment_drift() -> None:
+    """The diff receipt renders the dropped-symbol drift warning block."""
+    from rich.text import Text
+
+    result = MenuconfigResult(
+        ran=True,
+        saved=True,
+        changed=True,
+        diff_lines=[Text("+CONFIG_X=y")],
+        lines_changed=1,
+        seeded_from="board:btt-x",
+        drift_warnings=["CONFIG_STM32_FLASH_START_20200=y"],
+    )
+    note = ConfigDiffDialog(result)._drift_note()
+    assert note is not None
+    text = note.plain
+    assert "1 profile setting not recognized" in text
+    assert "CONFIG_STM32_FLASH_START_20200=y" in text
+    assert "menuconfig before flashing" in text
+
+
+def test_receipt_no_drift_note_when_clean() -> None:
+    result = MenuconfigResult(ran=True, saved=True, seeded_from="board:btt-x")
+    assert ConfigDiffDialog(result)._drift_note() is None
+
+
+def test_receipt_summary_surfaces_seed_source() -> None:
+    """The diff receipt tells the user the config was seeded (and from where)."""
+    from rich.text import Text
+
+    result = MenuconfigResult(
+        ran=True,
+        saved=True,
+        changed=True,
+        diff_lines=[Text("+CONFIG_X=y")],
+        lines_changed=1,
+        seeded_from="mcu-default:stm32h723",
+    )
+    summary = ConfigDiffDialog(result)._summary().plain
+    assert "seeded from stm32h723 default" in summary
+
+
+def test_receipt_summary_surfaces_board_seed_source() -> None:
+    """A board-seeded config names the board profile in the receipt (Task 13)."""
+    from rich.text import Text
+
+    result = MenuconfigResult(
+        ran=True,
+        saved=True,
+        changed=True,
+        diff_lines=[Text("+CONFIG_X=y")],
+        lines_changed=1,
+        seeded_from="board:btt-octopus-pro-h723",
+    )
+    summary = ConfigDiffDialog(result)._summary().plain
+    assert "seeded from board btt-octopus-pro-h723" in summary
 
 
 def test_step_reports_no_change_when_menuconfig_unsaved(monkeypatch, tmp_path) -> None:
@@ -225,8 +486,9 @@ def test_wizard_configure_now_runs_menuconfig_and_shows_receipt(
 
     captured: dict = {}
 
-    def fake_suspended(app, device_key, klipper_dir):
+    def fake_suspended(app, device_key, klipper_dir, mcu=None, board=None):
         captured["device_key"] = device_key
+        captured["mcu"] = mcu
         from rich.text import Text
 
         return MenuconfigResult(
@@ -310,6 +572,32 @@ class _ModalHost(App[None]):
 
     def on_mount(self) -> None:
         self.push_screen(self._modal)
+
+
+def test_drift_receipt_mounts_and_renders_warning() -> None:
+    """The drift warning block composes and renders end-to-end in the modal."""
+    from rich.text import Text
+
+    result = MenuconfigResult(
+        ran=True,
+        saved=True,
+        changed=True,
+        diff_lines=[Text("+CONFIG_X=y")],
+        lines_changed=1,
+        seeded_from="board:btt-x",
+        drift_warnings=["CONFIG_STM32_FLASH_START_20200=y"],
+    )
+
+    async def go() -> None:
+        app = _ModalHost(ConfigDiffDialog(result))
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            drift = app.screen.query_one("#diff-drift")
+            rendered = drift.render().plain  # type: ignore[union-attr]
+            assert "CONFIG_STM32_FLASH_START_20200=y" in rendered
+            assert "not recognized" in rendered
+
+    run_async(go())
 
 
 def _sample_diff_result() -> MenuconfigResult:

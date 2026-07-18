@@ -32,6 +32,7 @@ from kflash.models import DiscoveredDevice
 from kflash.registry import Registry
 from kflash.ui import skin
 from kflash.ui.dialogs import (
+    BoardProfileDialog,
     ChoiceDialog,
     DecisionConfirmDialog,
     FlashMethodDialog,
@@ -234,6 +235,11 @@ def test_real_cmd_add_device_registers_usb(tmp_path, monkeypatch) -> None:
                     if "Display name" in current._message:
                         current.query_one("#prompt-input", Input).value = "Test Board"
                     await pilot.press("enter")
+                elif isinstance(current, BoardProfileDialog):
+                    # rp2040 now matches shipped board profiles; take the manual
+                    # path ("Other") so this test still exercises the manual
+                    # flash-method flow it asserts (none + make_flash / picoboot).
+                    await pilot.press("o")
                 elif isinstance(current, (FlashMethodDialog, ChoiceDialog)):
                     await pilot.press("enter")
                 elif isinstance(current, DecisionConfirmDialog):

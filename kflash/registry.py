@@ -84,6 +84,7 @@ class Registry:
                     notes=data.get("notes"),
                     role=data.get("role"),
                     last_flash_timestamp=data.get("last_flash_timestamp"),
+                    board=data.get("board"),
                 )
             except KeyError as exc:
                 missing_field = exc.args[0]
@@ -151,6 +152,8 @@ class Registry:
                 data["devices"][key]["role"] = device.role
             if device.last_flash_timestamp is not None:
                 data["devices"][key]["last_flash_timestamp"] = device.last_flash_timestamp
+            if device.board is not None:
+                data["devices"][key]["board"] = device.board
         for blocked in registry.blocked_devices:
             entry = {"pattern": blocked.pattern}
             if blocked.reason:

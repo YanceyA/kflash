@@ -62,7 +62,7 @@ from ..service import (
     klipper_service_stopped,
     verify_passwordless_sudo,
 )
-from ._common import _short_path
+from ._common import _short_path, emit_output_tail
 
 
 def cmd_flash(
@@ -498,6 +498,7 @@ def cmd_flash(
     build_result = run_build(klipper_dir, timeout=TIMEOUT_BUILD, use_ccache=use_ccache)
 
     if not build_result.success:
+        emit_output_tail(em, build_result.error_output)
         template = ERROR_TEMPLATES["build_failed"]
         em.error_with_recovery(
             template["error_type"],

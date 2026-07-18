@@ -132,6 +132,38 @@ class ConfigOutcome:
     ran_menuconfig: bool = False
 
 
+def _warn_fragment_drift(
+    em: Emitter, seed_fragment: list[str], config_mgr: ConfigManager
+) -> None:
+    """Emit an em.warn line for each board-fragment symbol dropped on load.
+
+    A symbol present in the recorded fragment but absent from the just-saved
+    config was silently dropped by an upstream Kconfig rename (kconfiglib drops
+    unknown lines on load), so a board fact reverted to the tree's default.
+    No-op for non-board seeds (``seed_fragment`` empty). Never raises: a read
+    failure here must not abort an otherwise-successful config phase.
+    """
+    if not seed_fragment:
+        return
+    from .boards import fragment_drift  # late import: avoids boards<->config cycle
+
+    try:
+        final = config_mgr.cache_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    drift = fragment_drift(seed_fragment, final)
+    if not drift:
+        return
+    noun = "setting" if len(drift) == 1 else "settings"
+    em.warn(
+        f"{len(drift)} profile {noun} not recognized by this Kalico version -- "
+        "the build will use this tree's default instead. Verify the bootloader "
+        "offset / clock settings in menuconfig before flashing:"
+    )
+    for symbol in drift:
+        em.warn(f"  dropped: {symbol}")
+
+
 def load_and_validate_config(
     *,
     entry: DeviceEntry,
@@ -151,12 +183,37 @@ def load_and_validate_config(
     """
     config_mgr = ConfigManager(device_key, klipper_dir)
 
+    # Seed-load shape shared with ui/menuconfig._run_menuconfig_step and
+    # device_add's post-add block: with no cache yet, prefer the board profile's
+    # fragment (guarded by entry.board), then fall back to the MCU default; read
+    # the seed label ONCE (save_cached_config clears the marker later), then load
+    # the cache (or start fresh) with a single load_cached_config call.
+    if not config_mgr.has_cached_config():
+        if entry.board is not None:
+            config_mgr.seed_from_board(entry.board)
+        if not config_mgr.has_cached_config():
+            config_mgr.seed_from_default(entry.mcu)
+
+    seeded_from = config_mgr.seed_source()
+    # Recorded board-fragment CONFIG_ lines (empty for defaults/device copies and
+    # legacy markers): read now, before save_cached_config() clears the marker,
+    # so the post-menuconfig drift check can flag any dropped by an upstream rename.
+    seed_fragment = config_mgr.seed_fragment_lines()
+
     # step_start/step_end mark the Config phase boundary for the operation
     # screen (a plain-text sink may collapse them to phase() lines).
-    if config_mgr.load_cached_config():
-        em.step_start(
-            "Config", f"Loaded cached config for '{entry.name}'", device_key=device_key
-        )
+    if config_mgr.has_cached_config():
+        config_mgr.load_cached_config()
+        if config_mgr.is_seeded():
+            em.step_start(
+                "Config",
+                f"Config seeded from {seeded_from or 'unknown'} -- review required",
+                device_key=device_key,
+            )
+        else:
+            em.step_start(
+                "Config", f"Loaded cached config for '{entry.name}'", device_key=device_key
+            )
     else:
         config_mgr.clear_klipper_config()
         em.step_start(
@@ -164,6 +221,10 @@ def load_and_validate_config(
         )
 
     ran_menuconfig = False
+
+    if config_mgr.is_seeded():
+        # A seeded config never flows straight to build: force one review.
+        skip_menuconfig = False
 
     if skip_menuconfig and not require_menuconfig:
         if config_mgr.has_cached_config():
@@ -205,6 +266,7 @@ def load_and_validate_config(
         try:
             config_mgr.save_cached_config()
             em.phase("Config", f"Cached config for '{entry.name}'")
+            _warn_fragment_drift(em, seed_fragment, config_mgr)
         except ConfigError as e:
             em.error_with_recovery(
                 "Config error",
@@ -261,9 +323,29 @@ def resolve_target_mcu_version(
 ) -> Optional[str]:
     """Resolve which Moonraker MCU name corresponds to ``entry``.
 
-    Fuzzy match on name/key first, then chip-type, then fall back to ``main``.
+    When the registry records the Klipper MCU object name, the lookup is
+    strict: normalize ("mcu" -> "main", "mcu nhk" -> "nhk"), match keys
+    case-insensitively, and return None when that MCU is not reporting.
+    Never guess another board's version -- a wrong match here feeds the
+    "firmware already up-to-date" prompt with the wrong board's version.
+
+    Legacy entries without ``mcu_name`` keep the best-effort fuzzy match on
+    name/key then chip-type, but no longer fall back to ``main``.
     Returns the matched MCU name (a key of ``mcu_versions``) or None.
     """
+    if entry.mcu_name is not None:
+        if entry.mcu_name == "mcu":
+            lookup = "main"
+        elif entry.mcu_name.startswith("mcu "):
+            lookup = entry.mcu_name[4:]
+        else:
+            lookup = entry.mcu_name
+        lookup_lower = lookup.lower()
+        for mcu_name in mcu_versions:
+            if mcu_name.lower() == lookup_lower:
+                return mcu_name
+        return None
+
     friendly = [n for n in mcu_versions if not any(c.isdigit() for c in n)]
     chip_keys = [n for n in mcu_versions if any(c.isdigit() for c in n)]
     target_mcu: Optional[str] = None
@@ -286,8 +368,6 @@ def resolve_target_mcu_version(
             ):
                 target_mcu = mcu_name
                 break
-    if target_mcu is None and "main" in mcu_versions:
-        target_mcu = "main"
     return target_mcu
 
 
@@ -318,6 +398,12 @@ def emit_host_and_mcu_versions(
             continue
         marker = "*" if mcu_name == display_target else " "
         em.phase("Version", f"  [{marker}] MCU {mcu_name}: {mcu_version}")
+
+    if target_mcu is None:
+        em.warn(
+            "Device firmware version not reported by Klipper"
+            " - cannot compare with host"
+        )
 
 
 # ---------------------------------------------------------------------------

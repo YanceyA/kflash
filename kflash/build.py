@@ -61,10 +61,8 @@ def run_menuconfig(klipper_dir: str, config_path: str) -> tuple[int, bool]:
     return returncode, was_saved
 
 
-def _captured_tail(result: runner.CommandResult, quiet: bool) -> Optional[str]:
-    """Return the last 200 captured output lines (quiet builds only)."""
-    if not quiet:
-        return None
+def _captured_tail(result: runner.CommandResult) -> Optional[str]:
+    """Return the last 200 lines of the captured build output."""
     raw = (result.stdout or "") + (result.stderr or "")
     lines = raw.splitlines()
     return "\n".join(lines[-200:])
@@ -73,18 +71,19 @@ def _captured_tail(result: runner.CommandResult, quiet: bool) -> Optional[str]:
 def run_build(
     klipper_dir: str,
     timeout: int = TIMEOUT_BUILD,
-    quiet: bool = False,
     use_ccache: bool = False,
 ) -> BuildResult:
-    """Run make clean + make -j with streaming output.
+    """Run make clean + make -j with captured output.
 
-    Executes build in klipper directory with inherited stdio for real-time
-    output. Uses all available CPU cores for parallel compilation.
+    Executes build in klipper directory, capturing stdout/stderr instead of
+    inheriting the terminal (a build's high-volume output would otherwise
+    overdraw the TUI). Uses all available CPU cores for parallel compilation.
+    On failure, the last 200 captured lines are returned in
+    ``BuildResult.error_output``.
 
     Args:
         klipper_dir: Path to klipper source directory (supports ~)
         timeout: Seconds before timeout (default: TIMEOUT_BUILD)
-        quiet: Capture output instead of streaming to terminal
         use_ccache: Enable ccache build acceleration if available
 
     Returns:
@@ -100,28 +99,21 @@ def run_build(
         # Configure ccache on first use (idempotent)
         configure_ccache()
         pre_stats = get_ccache_stats()
-    # Run make clean with inherited stdio (streaming) or captured (quiet)
-    if quiet:
-        clean_result = runner.run(
-            ["make", "clean"],
-            cwd=str(klipper_path),
-            timeout=timeout,
-            env=build_env,  # None uses default environment
-        )
-    else:
-        clean_result = runner.run_streaming(
-            ["make", "clean"],
-            cwd=str(klipper_path),
-            timeout=timeout,
-            env=build_env,
-        )
+
+    # Run make clean with captured output
+    clean_result = runner.run(
+        ["make", "clean"],
+        cwd=str(klipper_path),
+        timeout=timeout,
+        env=build_env,  # None uses default environment
+    )
 
     if clean_result.timed_out:
         return BuildResult(
             success=False,
             elapsed_seconds=time.monotonic() - start_time,
             error_message=f"make clean timed out after {timeout}s",
-            error_output=_captured_tail(clean_result, quiet),
+            error_output=_captured_tail(clean_result),
         )
 
     if clean_result.returncode != 0:
@@ -130,32 +122,24 @@ def run_build(
             success=False,
             elapsed_seconds=elapsed,
             error_message=f"make clean failed with exit code {clean_result.returncode}",
-            error_output=_captured_tail(clean_result, quiet),
+            error_output=_captured_tail(clean_result),
         )
 
-    # Run make -j with all available cores
+    # Run make -j with all available cores, captured output
     nproc = multiprocessing.cpu_count()
-    if quiet:
-        build_result = runner.run(
-            ["make", f"-j{nproc}"],
-            cwd=str(klipper_path),
-            timeout=timeout,
-            env=build_env,  # None uses default environment
-        )
-    else:
-        build_result = runner.run_streaming(
-            ["make", f"-j{nproc}"],
-            cwd=str(klipper_path),
-            timeout=timeout,
-            env=build_env,
-        )
+    build_result = runner.run(
+        ["make", f"-j{nproc}"],
+        cwd=str(klipper_path),
+        timeout=timeout,
+        env=build_env,  # None uses default environment
+    )
 
     if build_result.timed_out:
         return BuildResult(
             success=False,
             elapsed_seconds=time.monotonic() - start_time,
             error_message=f"Build timed out after {timeout}s",
-            error_output=_captured_tail(build_result, quiet),
+            error_output=_captured_tail(build_result),
         )
 
     elapsed = time.monotonic() - start_time
@@ -165,7 +149,7 @@ def run_build(
             success=False,
             elapsed_seconds=elapsed,
             error_message=f"make failed with exit code {build_result.returncode}",
-            error_output=_captured_tail(build_result, quiet),
+            error_output=_captured_tail(build_result),
         )
 
     # Check for firmware output (.bin preferred, .uf2 for RP2040)
