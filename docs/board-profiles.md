@@ -17,7 +17,7 @@ MCU, flash method, or sub-fields afterward.
 
 ## Shipped profiles
 
-kflash ships **13** curated profiles. Each fact (MCU variant, crystal,
+kflash ships **15** curated profiles. Each fact (MCU variant, crystal,
 bootloader offset, comms interface) is verified against the manufacturer's
 authoritative source and validated with `make olddefconfig` on a real Kalico
 tree before shipping. Profiles are **never version-locked** — the fragments are
@@ -34,6 +34,8 @@ changes.
 | BTT Manta M8P V2.0 | STM32H723 | Katapult USB | Docs |
 | BTT EBB36/42 CAN v1.1/v1.2 | STM32G0B1 | Katapult CAN | Docs |
 | BTT EBB SB2209/SB2240 CAN V1.0 | STM32G0B1 | Katapult CAN | Docs |
+| BTT HBB / HBB Fe V1.0 | RP2040 | Make Flash (BOOT/DFU) | Hardware |
+| BTT HBB / HBB Fe V1.0 (Katapult) | RP2040 | Katapult USB | Docs |
 | LDO Nitehawk-36 | RP2040 | Katapult USB | Hardware |
 | Mellow Fly SHT36 v1/v2 | STM32F072 | Katapult CAN | Docs |
 | Mellow Fly SHT36 v3 | RP2040 | Katapult CAN | Docs |

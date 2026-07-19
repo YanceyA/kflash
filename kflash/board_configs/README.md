@@ -33,6 +33,6 @@ behind it -- a fragment that pins any of them must enable it too.
 User/community fragments live alongside user profiles in
 `~/.config/kalico-flash/boards/<key>.config` instead of here.
 
-The catalog currently ships 13 profiles (see `kflash/boards.py`
+The catalog currently ships 15 profiles (see `kflash/boards.py`
 `SHIPPED_PROFILES` for the authoritative list). This directory is tracked in git
 so shipped-fragment path resolution has a stable home.

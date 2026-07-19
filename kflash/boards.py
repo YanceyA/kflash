@@ -212,6 +212,32 @@ _BTT_SB2209_2240_CAN_SOURCE = (
     "https://github.com/bigtreetech/EBB/blob/master/EBB%20SB2240_2209%20CAN/"
     "sample-bigtreetech-ebb-sb-canbus-v1.0.cfg"
 )
+# The BTT HBB repo ships a User Manual and a sample Klipper config. The manual's
+# section 4.1 "Compiling the Firmware" is the OFFICIAL firmware-build reference
+# (RP2040, "Bootloader offset (No bootloader)", "Flash chip (W25Q080 with CLKDIV
+# 2)", "Communication interface (USB)", and an EMPTY "GPIO pins to set at
+# micro-controller startup" -- no required startup pin); the sample cfg confirms
+# the USB serial identity (Klipper_rp2040_hbb). The HBB is a Klipper macro keypad
+# (7 keys + 7 WS2812B RGB), NOT a toolboard -- USB only, no CAN, no Katapult
+# (matching kflash's Known Working Hardware entry: "BTT HBB | RP2040 | USB | No").
+# HBB and HBB Fe are the same electronics (the Fe lacks silk screening), so one
+# profile covers both. This is the same bare-RP2040 build/flash shape as the
+# generic Raspberry Pi Pico -- the sample cfg is cited as primary source, with the
+# manual's menuconfig section named in the fragment header (dual-source pattern).
+_BTT_HBB_SOURCE = (
+    "https://github.com/bigtreetech/HBB/blob/master/sample-bigtreetech-hbb.cfg"
+)
+# Optional Katapult variant of the HBB. BTT ships the HBB as a no-bootloader USB
+# board (the stock btt-hbb profile above); installing Katapult is a community/DIY
+# add-on NOT documented by BTT. Katapult supports the RP2040 over USB and is
+# deployed the same way the stock board is flashed -- via the RP2040 ROM
+# bootloader (hold BOOT, then `make flash`, or drag-drop katapult.uf2). The Klipper
+# app then moves to the 16KiB offset (FLASH_START_4000) and is flashed over USB
+# through Katapult without pressing BOOT again. The 16KiB app offset is the
+# established RP2040-Katapult convention -- identical to the docs-verified in-repo
+# ldo-nitehawk-36 (RP2040, Katapult USB) profile; Katapult's own repo documents the
+# RP2040 USB support and BOOT-button deploy flow (github.com/Arksine/katapult, cited
+# in the fragment header). ``source`` carries the HBB board provenance either way.
 _BTT_CHECKED = "kalico v2026.07, 2026-07-17"
 
 # --- Batch D sources (LDO / Mellow / Fysetc / Raspberry Pi) ---
@@ -418,6 +444,47 @@ SHIPPED_PROFILES: list[BoardProfile] = [
         verified="docs",
         checked_against=_BTT_CHECKED,
         role="toolhead",
+    ),
+    BoardProfile(
+        key="btt-hbb",
+        name="BTT HBB / HBB Fe V1.0 (RP2040)",
+        mcu="rp2040",
+        bootloader_method="none",
+        flash_command="make_flash",
+        config_fragment=True,
+        notes=(
+            "Klipper macro keypad (7 keys + 7 WS2812B RGB), USB (NOT a CAN "
+            "toolboard). No bootloader (FLASH_START 0x100, RP2040 boot2 "
+            "reserve), W25Q080 flash, USB. Hold the BOOT button while "
+            "connecting USB to enter the RP2040's built-in DFU bootloader, then "
+            "'make flash FLASH_DEVICE=2e8a:0003'; after the first flash, "
+            "'make flash FLASH_DEVICE=/dev/serial/by-id/usb-Klipper_rp2040_hbb-if00' "
+            "over USB. HBB and HBB Fe share the same build. No Katapult."
+        ),
+        source=_BTT_HBB_SOURCE,
+        verified="hardware",
+        checked_against="kalico v2026.07, 2026-07-19",
+    ),
+    BoardProfile(
+        key="btt-hbb-katapult",
+        name="BTT HBB / HBB Fe V1.0 (RP2040, Katapult)",
+        mcu="rp2040",
+        bootloader_method="usb",
+        flash_command="katapult",
+        config_fragment=True,
+        notes=(
+            "COMMUNITY/DIY variant -- NOT BTT-documented. Same HBB keypad as the "
+            "stock 'btt-hbb' profile, but with Katapult installed for button-free "
+            "USB flashing. 16KiB Katapult bootloader offset (0x4000), USB. Requires "
+            "Katapult installed first: hold BOOT while connecting USB, flash "
+            "katapult.uf2 via the RP2040 ROM bootloader ('make flash "
+            "FLASH_DEVICE=2e8a:0003' or drag-drop the .uf2), then build Klipper at "
+            "the 16KiB offset and flash it over USB through Katapult. Use the stock "
+            "'btt-hbb' profile if you have NOT installed Katapult."
+        ),
+        source=_BTT_HBB_SOURCE,
+        verified="docs",
+        checked_against="kalico v2026.07, 2026-07-19",
     ),
     BoardProfile(
         key="ldo-nitehawk-36",
