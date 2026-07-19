@@ -11,7 +11,7 @@ Single-device flash (`F`) runs four phases:
 3. **Build** — `make clean` + `make -j$(nproc)` with 300s timeout; build output is captured (not dumped to the terminal), and on failure the tail of the log is shown inline
 4. **Flash** — Stop Klipper, enter bootloader, flash firmware (output streams live into the log with a real-progress bar), verify device returns, restart Klipper
 
-**Flash All** (`B`) builds and flashes all connected, flashable devices that have a cached `.config`. Devices are flashed in role-based order for CAN safety (see [CAN Bus Support](#can-bus-support)).
+**Flash All** (`B`) builds and flashes all connected, flashable devices that have a cached `.config`. Devices are flashed in role-based order for CAN safety (see [CAN Bus Support](#can-bus-support)). Devices whose config was auto-seeded but never reviewed in `menuconfig` are skipped (Flash All can't run `menuconfig`); review one via `M` or flash it individually first.
 
 ## Safety Checks
 
