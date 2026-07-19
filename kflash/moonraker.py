@@ -66,6 +66,24 @@ def get_print_status() -> Optional[PrintStatus]:
         return None
 
 
+def get_klippy_state() -> Optional[str]:
+    """Query Moonraker for the Klippy host state.
+
+    Returns "ready"/"startup"/"shutdown"/"error"/"disconnected", or None if
+    Moonraker itself is unreachable. Distinguishes "Moonraker down" from
+    "Moonraker up but Klippy not ready" (e.g. a board awaiting its first
+    flash referenced in printer.cfg).
+    """
+    try:
+        url = f"{MOONRAKER_URL}/server/info"
+        with urlopen(url, timeout=TIMEOUT) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        state = data["result"].get("klippy_state")
+        return str(state) if state else None
+    except (URLError, HTTPError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
+        return None
+
+
 def get_mcu_serial_map() -> Optional[dict[str, Optional[str]]]:
     """Query Moonraker configfile for MCU name -> serial path mapping.
 

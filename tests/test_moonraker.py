@@ -8,6 +8,9 @@ matching, and ``get_mcu_version_for_device`` with an injected versions dict.
 
 from __future__ import annotations
 
+import json
+from urllib.error import URLError
+
 import pytest
 
 from kflash import moonraker as m
@@ -141,6 +144,36 @@ def test_parse_mcu_objects_mixed_valid_and_invalid():
 )
 def test_detect_firmware_flavor(version, expected):
     assert m.detect_firmware_flavor(version) == expected
+
+
+# ---------------------------------------------------------------------------
+# get_klippy_state — server/info query
+# ---------------------------------------------------------------------------
+
+
+def test_get_klippy_state_parses_server_info(monkeypatch):
+    payload = json.dumps({"result": {"klippy_state": "startup"}}).encode()
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return payload
+
+    monkeypatch.setattr(m, "urlopen", lambda url, timeout: _Resp())
+    assert m.get_klippy_state() == "startup"
+
+
+def test_get_klippy_state_none_when_unreachable(monkeypatch):
+    def _raise(url, timeout):
+        raise URLError("down")
+
+    monkeypatch.setattr(m, "urlopen", _raise)
+    assert m.get_klippy_state() is None
 
 
 # ---------------------------------------------------------------------------
