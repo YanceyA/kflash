@@ -83,6 +83,12 @@ output, and a progress bar tracking real flash progress.
 
 ## Flash Workflow
 
+kflash targets boards that enumerate in `/dev/serial/by-id/` as `Klipper_` or
+`katapult_` USB devices, or as Katapult CAN nodes. A board already sitting in
+the Katapult bootloader is flashed directly. Installing Katapult itself for the
+first time — or recovering a board that has neither firmware (e.g. raw DFU or
+RP2 BOOTSEL) — is a manual step outside kflash.
+
 Single-device flash (`F`) runs four phases:
 
 1. **Discovery** — scan USB or check CAN target, run Moonraker print-safety check

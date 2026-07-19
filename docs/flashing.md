@@ -4,6 +4,8 @@ Part of the kflash docs — back to the [README](../README.md).
 
 ## Flash Workflow
 
+**Scope:** kflash flashes boards that enumerate in `/dev/serial/by-id/` as `usb-Klipper_*` or `usb-katapult_*` USB devices, or as Katapult CAN nodes. A board already in the Katapult bootloader is flashed directly. Installing Katapult itself for the first time, or recovering a board with neither firmware (raw DFU, RP2 BOOTSEL), is a manual step outside kflash.
+
 Single-device flash (`F`) runs four phases:
 
 1. **Discovery** — Scan USB or check CAN target, validate transport, run Moonraker print-safety check
