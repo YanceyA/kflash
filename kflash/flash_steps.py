@@ -32,7 +32,7 @@ from .build import run_menuconfig
 from .ccache import is_ccache_available
 from .config import ConfigManager
 from .decisions import ChooseCcacheActionDecision, ConfirmDecision, DecisionProvider
-from .discovery import verify_can_device_after_flash, wait_for_device
+from .discovery import is_katapult_device, verify_can_device_after_flash, wait_for_device
 from .errors import ERROR_TEMPLATES, ConfigError
 from .events import Emitter
 from .flasher import TIMEOUT_CAN_FLASH, TIMEOUT_FLASH, execute_flash
@@ -521,9 +521,29 @@ def run_flash_sequence(
     # a per-device checklist + elapsed timer (a plain-text sink may collapse
     # them to the same phase() lines emitted before the seam existed).
     dkey = entry.key
+    # First-flash bootstrap: a usb-katapult_* path means the board is already
+    # sitting in the Katapult bootloader (no running Klipper to receive an
+    # entry request, so entry/re-enumeration would time out) -- flash directly.
+    # UF2 is excluded: it needs BOOTSEL mass-storage mode, which the manual
+    # prompt is responsible for.
+    already_in_bootloader = (
+        not is_can
+        and device_path is not None
+        and entry.bootloader_method in ("usb", "serial", "manual")
+        and entry.flash_command != "uf2_mount"
+        and is_katapult_device(Path(device_path).name)
+    )
     if entry.bootloader_method == "none":
         em.step_end("Bootloader", "Skipped (method: none)", device_key=dkey)
         boot_device_path: Optional[str] = device_path
+        result.bootloader_ok = True
+    elif already_in_bootloader:
+        em.step_end(
+            "Bootloader",
+            f"Already in Katapult bootloader -- {_short_path(device_path)}",
+            device_key=dkey,
+        )
+        boot_device_path = device_path
         result.bootloader_ok = True
     else:
         if batch and is_can:

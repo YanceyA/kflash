@@ -20,12 +20,13 @@ from kflash.flasher import (
     flash_katapult,
     flash_katapult_can,
 )
-from kflash.models import DeviceEntry, DiscoveredDevice, GlobalConfig
+from kflash.models import BootloaderResult, DeviceEntry, DiscoveredDevice, GlobalConfig
 from kflash.runner import CommandResult
 
 SERIAL = "usb-Klipper_stm32h723xx_ABC123-if00"
 PATTERN = "usb-Klipper_stm32h723xx_ABC123*"
 UUID = "112233445566"
+KATAPULT_SERIAL = "usb-katapult_stm32h723xx_ABC123-if00"
 
 
 @pytest.fixture
@@ -859,3 +860,149 @@ class TestEmitHostAndMcuVersions:
         em = Emitter(sink)
         flash_steps.emit_host_and_mcu_versions(em, HOST_VER, {"main": HOST_VER}, "main")
         assert "not reported" not in sink.text()
+
+
+# ---------------------------------------------------------------------------
+# Already-in-bootloader first-flash skip (bare Katapult device)
+# ---------------------------------------------------------------------------
+
+
+def _forbid_enter_bootloader(monkeypatch):
+    def _fail(**kwargs):
+        raise AssertionError("enter_bootloader must not be called")
+
+    monkeypatch.setattr(flash_steps, "enter_bootloader", _fail)
+
+
+def test_usb_katapult_device_skips_bootloader_entry(monkeypatch, em, toolchain):
+    """A usb-katapult_* target flashes directly: no entry, flash gets the
+    katapult path, verify still requires the Klipper prefix to return."""
+    fake = FakeRunner(default=CommandResult(0))
+    runner.set_runner(fake)
+    _reappear(monkeypatch)  # reappears as usb-Klipper_* -> verify passes
+    _forbid_enter_bootloader(monkeypatch)
+
+    step = run_flash_sequence(
+        entry=_usb_entry(bootloader_method="usb"),
+        device_path=f"/dev/serial/by-id/{KATAPULT_SERIAL}",
+        firmware_path=toolchain["firmware"],
+        config=toolchain["config"],
+        klipper_dir=toolchain["config"].klipper_dir,
+        katapult_dir=toolchain["katapult"],
+        em=em,
+        decider=HeadlessDecisionProvider(),
+        verify_timeout=2.0,
+    )
+
+    assert step.bootloader_ok
+    assert step.success
+    # The flash subprocess was pointed at the katapult device path
+    flash_calls = [argv for mode, argv in fake.calls if mode == "stream_lines"]
+    assert any(KATAPULT_SERIAL in " ".join(argv) for argv in flash_calls)
+
+
+def test_serial_katapult_device_skips_bootloader_entry(monkeypatch, toolchain):
+    fake = FakeRunner(default=CommandResult(0))
+    runner.set_runner(fake)
+    _reappear(monkeypatch)
+    _forbid_enter_bootloader(monkeypatch)
+    sink = RecordingSink()
+
+    step = run_flash_sequence(
+        entry=_usb_entry(bootloader_method="serial"),
+        device_path=f"/dev/serial/by-id/{KATAPULT_SERIAL}",
+        firmware_path=toolchain["firmware"],
+        config=toolchain["config"],
+        klipper_dir=toolchain["config"].klipper_dir,
+        katapult_dir=toolchain["katapult"],
+        em=Emitter(sink),
+        decider=HeadlessDecisionProvider(),
+        verify_timeout=2.0,
+    )
+
+    assert step.success
+    assert "Already in Katapult bootloader" in sink.text()
+
+
+def test_manual_katapult_device_skips_ready_prompt(monkeypatch, em, toolchain):
+    """manual + katapult with the board already in the bootloader: no
+    'press Enter' gate, flash proceeds directly."""
+    fake = FakeRunner(default=CommandResult(0))
+    runner.set_runner(fake)
+    _reappear(monkeypatch)
+    decider = FakeDecisionProvider()
+
+    step = run_flash_sequence(
+        entry=_usb_entry(bootloader_method="manual"),
+        device_path=f"/dev/serial/by-id/{KATAPULT_SERIAL}",
+        firmware_path=toolchain["firmware"],
+        config=toolchain["config"],
+        klipper_dir=toolchain["config"].klipper_dir,
+        katapult_dir=toolchain["katapult"],
+        em=em,
+        decider=decider,
+        verify_timeout=2.0,
+    )
+
+    assert step.success
+    assert decider.manual_calls == []
+
+
+def test_uf2_manual_katapult_device_still_prompts(monkeypatch, em, toolchain):
+    """UF2 flashing needs BOOTSEL mass-storage mode, so a katapult serial path
+    must NOT short-circuit the manual bootloader prompt."""
+    calls = []
+
+    def _fake_enter(**kwargs):
+        calls.append(kwargs)
+        return BootloaderResult(success=False, error_message="stub entry failure")
+
+    monkeypatch.setattr(flash_steps, "enter_bootloader", _fake_enter)
+
+    entry = _usb_entry(flash_command="uf2_mount", bootloader_method="manual")
+    step = run_flash_sequence(
+        entry=entry,
+        device_path=f"/dev/serial/by-id/{KATAPULT_SERIAL}",
+        firmware_path=toolchain["firmware"],
+        config=toolchain["config"],
+        klipper_dir=toolchain["config"].klipper_dir,
+        katapult_dir=toolchain["katapult"],
+        em=em,
+        decider=FakeDecisionProvider(),
+        verify_timeout=2.0,
+    )
+
+    assert len(calls) == 1  # entry was attempted, not skipped
+    assert not step.bootloader_ok
+
+
+def test_klipper_device_still_enters_bootloader(monkeypatch, em, toolchain):
+    """The normal running-Klipper path is unchanged: a usb-Klipper_* target
+    still goes through enter_bootloader."""
+    fake = FakeRunner(default=CommandResult(0))
+    runner.set_runner(fake)
+    _reappear(monkeypatch)
+    calls = []
+
+    def _fake_enter(**kwargs):
+        calls.append(kwargs)
+        return BootloaderResult(
+            success=True, device_path=f"/dev/serial/by-id/{KATAPULT_SERIAL}"
+        )
+
+    monkeypatch.setattr(flash_steps, "enter_bootloader", _fake_enter)
+
+    step = run_flash_sequence(
+        entry=_usb_entry(bootloader_method="usb"),
+        device_path=f"/dev/serial/by-id/{SERIAL}",
+        firmware_path=toolchain["firmware"],
+        config=toolchain["config"],
+        klipper_dir=toolchain["config"].klipper_dir,
+        katapult_dir=toolchain["katapult"],
+        em=em,
+        decider=HeadlessDecisionProvider(),
+        verify_timeout=2.0,
+    )
+
+    assert len(calls) == 1
+    assert step.success
