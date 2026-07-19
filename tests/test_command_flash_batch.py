@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import types
 
-from conftest import FakeDecisionProvider
+from conftest import FakeDecisionProvider, RecordingSink
 
 from kflash import flash_steps
 from kflash.commands import flash_batch
@@ -97,8 +97,14 @@ def test_dedupe_empty_list():
 
 
 class _FakeConfigManager:
+    seeded_keys: set = set()  # tests mutate this per-case; reset in each test
+
     def __init__(self, key, klipper_dir):
+        self.key = key
         self.cache_path = types.SimpleNamespace(exists=lambda: True)
+
+    def is_seeded(self):
+        return self.key in self.seeded_keys
 
     def load_cached_config(self):
         return True
@@ -192,3 +198,65 @@ def test_all_up_to_date_confirm_true_proceeds_past_version_gate(monkeypatch):
     assert rc == 1
     ids = [c.id for c in decider.confirm_calls]
     assert "flash_all_older_versions" in ids
+
+
+# ---------------------------------------------------------------------------
+# Seeded-but-unreviewed configs are skipped by Flash All (review gate parity)
+# ---------------------------------------------------------------------------
+
+
+def _registry_two_usb():
+    a = DeviceEntry(key="octo", name="Octopus", mcu="stm32h723",
+                    serial_pattern="usb-Klipper_x*")
+    b = DeviceEntry(key="nite", name="Nitehawk", mcu="rp2040",
+                    serial_pattern="usb-Klipper_y*")
+    data = RegistryData(
+        global_config=GlobalConfig(klipper_dir="/tmp/k", katapult_dir="/tmp/kt"),
+        devices={"octo": a, "nite": b},
+    )
+    return _FakeRegistry(data)
+
+
+def test_flash_all_skips_seeded_device_and_continues(monkeypatch):
+    _reach_version_stage(monkeypatch, outdated=True)
+    monkeypatch.setattr(_FakeConfigManager, "seeded_keys", {"nite"})
+    sink = RecordingSink()
+    em = Emitter(sink)
+    # Cancel at the "Flash N device(s)?" confirm -- Stage 1 is what's under test.
+    decider = FakeDecisionProvider(confirms={"flash_batch": False})
+
+    rc = cmd_flash_all(_registry_two_usb(), em, decider)
+
+    assert rc == 0  # cancelled at the batch confirm, not an error
+    text = sink.text()
+    assert "Skipping Nitehawk" in text
+    assert "not reviewed" in text
+    # The surviving device count excludes the seeded one.
+    assert "1 device(s) validated" in text
+
+
+def test_flash_all_all_seeded_errors(monkeypatch):
+    _reach_version_stage(monkeypatch, outdated=True)
+    monkeypatch.setattr(_FakeConfigManager, "seeded_keys", {"octo"})
+    sink = RecordingSink()
+    em = Emitter(sink)
+
+    rc = cmd_flash_all(_registry_one_usb(), em, FakeDecisionProvider())
+
+    assert rc == 1
+    assert "Skipping Octopus" in sink.text()
+
+
+def test_flash_all_unseeded_devices_unaffected(monkeypatch):
+    # Regression guard: with no seeded keys, Stage 1 validates both devices.
+    _reach_version_stage(monkeypatch, outdated=True)
+    monkeypatch.setattr(_FakeConfigManager, "seeded_keys", set())
+    sink = RecordingSink()
+    em = Emitter(sink)
+    decider = FakeDecisionProvider(confirms={"flash_batch": False})
+
+    rc = cmd_flash_all(_registry_two_usb(), em, decider)
+
+    assert rc == 0
+    assert "Skipping" not in sink.text()
+    assert "2 device(s) validated" in sink.text()

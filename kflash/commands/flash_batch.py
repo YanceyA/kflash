@@ -187,6 +187,30 @@ def cmd_flash_all(registry, em: Emitter, decider: DecisionProvider) -> int:
 
     flashable_devices = unblocked_devices
 
+    # Seeded-but-unreviewed configs never reach a batch build: Flash All cannot
+    # run menuconfig, so the mandatory one-time review of an auto-seeded config
+    # (see menuconfig.needs_review) must happen on the single-flash path first.
+    seeded_devices: list = []
+    reviewed_devices: list = []
+    for entry in flashable_devices:
+        config_mgr = ConfigManager(entry.key, klipper_dir)
+        if config_mgr.is_seeded():
+            seeded_devices.append(entry)
+        else:
+            reviewed_devices.append(entry)
+
+    for entry in seeded_devices:
+        em.warn(
+            f"Skipping {entry.name}: config was auto-seeded and not reviewed"
+            " -- open menuconfig (M) or flash it individually first"
+        )
+
+    if not reviewed_devices:
+        em.error("All devices need a config review. Nothing to flash.")
+        return 1
+
+    flashable_devices = reviewed_devices
+
     # Check cached configs exist
     missing_configs: list[str] = []
     for entry in flashable_devices:
