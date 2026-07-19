@@ -212,6 +212,21 @@ _BTT_SB2209_2240_CAN_SOURCE = (
     "https://github.com/bigtreetech/EBB/blob/master/EBB%20SB2240_2209%20CAN/"
     "sample-bigtreetech-ebb-sb-canbus-v1.0.cfg"
 )
+# The BTT HBB repo ships a User Manual and a sample Klipper config. The manual's
+# section 4.1 "Compiling the Firmware" is the OFFICIAL firmware-build reference
+# (RP2040, "Bootloader offset (No bootloader)", "Flash chip (W25Q080 with CLKDIV
+# 2)", "Communication interface (USB)", and an EMPTY "GPIO pins to set at
+# micro-controller startup" -- no required startup pin); the sample cfg confirms
+# the USB serial identity (Klipper_rp2040_hbb). The HBB is a Klipper macro keypad
+# (7 keys + 7 WS2812B RGB), NOT a toolboard -- USB only, no CAN, no Katapult
+# (matching kflash's Known Working Hardware entry: "BTT HBB | RP2040 | USB | No").
+# HBB and HBB Fe are the same electronics (the Fe lacks silk screening), so one
+# profile covers both. This is the same bare-RP2040 build/flash shape as the
+# generic Raspberry Pi Pico -- the sample cfg is cited as primary source, with the
+# manual's menuconfig section named in the fragment header (dual-source pattern).
+_BTT_HBB_SOURCE = (
+    "https://github.com/bigtreetech/HBB/blob/master/sample-bigtreetech-hbb.cfg"
+)
 _BTT_CHECKED = "kalico v2026.07, 2026-07-17"
 
 # --- Batch D sources (LDO / Mellow / Fysetc / Raspberry Pi) ---
@@ -418,6 +433,26 @@ SHIPPED_PROFILES: list[BoardProfile] = [
         verified="docs",
         checked_against=_BTT_CHECKED,
         role="toolhead",
+    ),
+    BoardProfile(
+        key="btt-hbb",
+        name="BTT HBB / HBB Fe V1.0 (RP2040)",
+        mcu="rp2040",
+        bootloader_method="none",
+        flash_command="make_flash",
+        config_fragment=True,
+        notes=(
+            "Klipper macro keypad (7 keys + 7 WS2812B RGB), USB (NOT a CAN "
+            "toolboard). No bootloader (FLASH_START 0x100, RP2040 boot2 "
+            "reserve), W25Q080 flash, USB. Hold the BOOT button while "
+            "connecting USB to enter the RP2040's built-in DFU bootloader, then "
+            "'make flash FLASH_DEVICE=2e8a:0003'; after the first flash, "
+            "'make flash FLASH_DEVICE=/dev/serial/by-id/usb-Klipper_rp2040_hbb-if00' "
+            "over USB. HBB and HBB Fe share the same build. No Katapult."
+        ),
+        source=_BTT_HBB_SOURCE,
+        verified="hardware",
+        checked_against="kalico v2026.07, 2026-07-19",
     ),
     BoardProfile(
         key="ldo-nitehawk-36",
