@@ -90,6 +90,10 @@ Single-device flash (`F`) runs four phases:
 3. **Build** — `make clean` + `make -j$(nproc)`, with build output captured
 4. **Flash** — stop Klipper, enter bootloader, flash, verify device returns, restart Klipper
 
+A board already sitting in the Katapult bootloader (fresh Katapult install,
+no Klipper app yet) is flashed directly — bootloader entry is skipped, so
+the first flash works end-to-end.
+
 **Flash All** (`B`) builds and flashes all connected, flashable devices that
 have a cached `.config`, in role-based order for CAN safety.
 

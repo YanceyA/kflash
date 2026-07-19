@@ -11,6 +11,8 @@ Single-device flash (`F`) runs four phases:
 3. **Build** — `make clean` + `make -j$(nproc)` with 300s timeout; build output is captured (not dumped to the terminal), and on failure the tail of the log is shown inline
 4. **Flash** — Stop Klipper, enter bootloader, flash firmware (output streams live into the log with a real-progress bar), verify device returns, restart Klipper
 
+If the target already presents as `usb-katapult_*` (Katapult installed but no Klipper app yet — first flash, or a previously aborted flash), step 4 skips bootloader entry and flashes directly. Applies to USB `usb`/`serial`/`manual` methods, not UF2 Copy (which needs BOOTSEL mode).
+
 **Flash All** (`B`) builds and flashes all connected, flashable devices that have a cached `.config`. Devices are flashed in role-based order for CAN safety (see [CAN Bus Support](#can-bus-support)).
 
 ## Safety Checks
