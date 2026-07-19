@@ -200,6 +200,28 @@ def test_match_serial_to_mcu_name_no_match():
     assert m.match_serial_to_mcu_name("usb-Klipper_stm32h723*", mcu_serials) is None
 
 
+def test_match_serial_to_mcu_name_matches_across_prefixes():
+    # Device registered while in Katapult mode: pattern has the katapult
+    # prefix, printer.cfg records the Klipper serial path.
+    mcu_serials = {
+        "mcu": "/dev/serial/by-id/usb-Klipper_rp2040_45474E621A858C5A-if00",
+    }
+    assert (
+        m.match_serial_to_mcu_name("usb-katapult_rp2040_45474E621A858C5A*", mcu_serials)
+        == "mcu"
+    )
+
+
+def test_match_serial_to_mcu_name_reverse_prefix_direction():
+    mcu_serials = {
+        "mcu hbb": "/dev/serial/by-id/usb-katapult_rp2040_ABC-if00",
+    }
+    assert (
+        m.match_serial_to_mcu_name("usb-Klipper_rp2040_ABC*", mcu_serials)
+        == "mcu hbb"
+    )
+
+
 # ---------------------------------------------------------------------------
 # get_mcu_version_for_device — direct lookup with injected versions
 # ---------------------------------------------------------------------------

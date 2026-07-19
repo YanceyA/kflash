@@ -21,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from . import runner
+from .discovery import prefix_variants
 from .models import PrintStatus
 
 # Connection settings (hardcoded per CONTEXT.md: no custom URL support)
@@ -272,12 +273,13 @@ def match_serial_to_mcu_name(pattern: str, mcu_serials: dict[str, Optional[str]]
     Returns:
         The matching MCU object name, or None if no match.
     """
+    variants = prefix_variants(pattern)
     for mcu_name, serial_path in mcu_serials.items():
         if not serial_path:
             continue
         # Extract filename from path
         filename = serial_path.rsplit("/", 1)[-1] if "/" in serial_path else serial_path
-        if fnmatch.fnmatchcase(filename, pattern):
+        if any(fnmatch.fnmatchcase(filename, v) for v in variants):
             return mcu_name
     return None
 
