@@ -874,16 +874,21 @@ def _forbid_enter_bootloader(monkeypatch):
     monkeypatch.setattr(flash_steps, "enter_bootloader", _fail)
 
 
-def test_usb_katapult_device_skips_bootloader_entry(monkeypatch, em, toolchain):
+@pytest.mark.parametrize("flash_command", ["katapult", "make_flash"])
+def test_usb_katapult_device_skips_bootloader_entry(
+    monkeypatch, em, toolchain, flash_command
+):
     """A usb-katapult_* target flashes directly: no entry, flash gets the
-    katapult path, verify still requires the Klipper prefix to return."""
+    katapult path, verify still requires the Klipper prefix to return. The
+    predicate deliberately admits make_flash too (both stream the device path
+    through run_streaming_lines: katapult's -d/serial arg, make's FLASH_DEVICE)."""
     fake = FakeRunner(default=CommandResult(0))
     runner.set_runner(fake)
     _reappear(monkeypatch)  # reappears as usb-Klipper_* -> verify passes
     _forbid_enter_bootloader(monkeypatch)
 
     step = run_flash_sequence(
-        entry=_usb_entry(bootloader_method="usb"),
+        entry=_usb_entry(flash_command=flash_command, bootloader_method="usb"),
         device_path=f"/dev/serial/by-id/{KATAPULT_SERIAL}",
         firmware_path=toolchain["firmware"],
         config=toolchain["config"],
@@ -899,6 +904,31 @@ def test_usb_katapult_device_skips_bootloader_entry(monkeypatch, em, toolchain):
     # The flash subprocess was pointed at the katapult device path
     flash_calls = [argv for mode, argv in fake.calls if mode == "stream_lines"]
     assert any(KATAPULT_SERIAL in " ".join(argv) for argv in flash_calls)
+
+
+def test_batch_usb_katapult_device_skips_bootloader_entry(monkeypatch, em, toolchain):
+    """Flash All (batch=True, decider=None) also skips entry for a device
+    already sitting in the Katapult bootloader."""
+    fake = FakeRunner(default=CommandResult(0))
+    runner.set_runner(fake)
+    _reappear(monkeypatch)
+    _forbid_enter_bootloader(monkeypatch)
+
+    step = run_flash_sequence(
+        entry=_usb_entry(bootloader_method="usb"),
+        device_path=f"/dev/serial/by-id/{KATAPULT_SERIAL}",
+        firmware_path=toolchain["firmware"],
+        config=toolchain["config"],
+        klipper_dir=toolchain["config"].klipper_dir,
+        katapult_dir=toolchain["katapult"],
+        em=em,
+        decider=None,
+        batch=True,
+        verify_timeout=2.0,
+    )
+
+    assert step.bootloader_ok
+    assert step.success
 
 
 def test_serial_katapult_device_skips_bootloader_entry(monkeypatch, toolchain):
