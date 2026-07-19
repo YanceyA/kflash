@@ -10,6 +10,20 @@
 
 ---
 
+## Implementation status
+
+| PR | Status | Branch | PR |
+|----|--------|--------|----|
+| **PR-1** — Flash All seeded-config gate | ✅ **Done** | `claude/first-flash-followups-pr1-uvm6rs` | [#4](https://github.com/YanceyA/kflash/pull/4) |
+| **PR-2** — First-flash UX (safety gate + prefix-agnostic match + docs) | ✅ **Done** | `feat/first-flash-ux` | [#5](https://github.com/YanceyA/kflash/pull/5) |
+| **PR-3** — Dashboard bootloader / CAN states | ⏳ **Ready to start once its dependency merges** | `feat/dashboard-bootloader-status` (not yet created) | — |
+
+- PR-1 and PR-2 are implemented, verified, pushed, and opened. Each was verified with `ruff check` clean, `mypy kflash` clean (only the pre-existing Python-3.9 notice), and the **full pytest suite green including all 12 `tests/ui` snapshots** (the snapshot deps were installed and the UI tests actually run, so the "12 env errors" caveat did not apply). Verification ran in a Linux environment rather than the Windows venv / Pi.
+- **PR-3 is blocked only on its stated dependency:** it imports `discovery.is_katapult_device`, which lands with PR #3 (`fix/katapult-first-flash`, currently open as [#3](https://github.com/YanceyA/kflash/pull/3)). As soon as #3 merges to `main`, PR-3 is ready to start — branch off updated `main`, then follow §PR-3 below unchanged.
+- Note: PR-1 shipped on branch `claude/first-flash-followups-pr1-uvm6rs` rather than the `fix/flash-all-seeded-gate` name suggested below; the code and behavior match §PR-1 exactly.
+
+---
+
 ## Orchestrator ground rules
 
 - Repo: `C:\dev_projects\kflash` (Windows). Local venv: `./.venv/Scripts/python.exe` (has pytest, ruff, mypy; does NOT have textual snapshot deps — 12 `tests/ui` errors locally are environmental).
@@ -29,6 +43,8 @@
 ---
 
 # PR-1: Flash All must not flash a seeded, unreviewed config
+
+> ✅ **Done** — shipped on `claude/first-flash-followups-pr1-uvm6rs`, opened as [#4](https://github.com/YanceyA/kflash/pull/4).
 
 **Branch:** `fix/flash-all-seeded-gate` (off `main`)
 **Priority:** highest — this is a hole in a safety invariant CLAUDE.md explicitly claims ("a seeded config cannot reach build/flash even when `menuconfig_before_flash` is off").
@@ -208,6 +224,8 @@ Run the full verification matrix (see ground rules). Then dispatch a final whole
 ---
 
 # PR-2: First-flash UX — honest safety gate + prefix-agnostic MCU-name match + docs
+
+> ✅ **Done** — shipped on `feat/first-flash-ux`, opened as [#5](https://github.com/YanceyA/kflash/pull/5).
 
 **Branch:** `feat/first-flash-ux` (off `main`; independent of PR #3 and PR-1)
 
@@ -446,6 +464,8 @@ Full verification matrix, final whole-branch review, push, open PR:
 
 # PR-3: Dashboard — surface bootloader state and CAN "not in printer.cfg"
 
+> ⏳ **Ready to start once its dependency merges.** Not started — it imports `discovery.is_katapult_device` from PR #3 (`fix/katapult-first-flash`, open as [#3](https://github.com/YanceyA/kflash/pull/3)), which is not yet on `main`. Once #3 merges, branch off updated `main` and follow this section unchanged.
+
 **Branch:** `feat/dashboard-bootloader-status` (off `main` **after PR #3 `fix/katapult-first-flash` is merged** — this PR imports `discovery.is_katapult_device` from it. Verify with `git log main --oneline | head` that commit "fix(flash): flash directly when target is already in Katapult bootloader" is present before starting.)
 
 **Context:** A registered board sitting in the Katapult bootloader renders as a green `connected` with version `-` (`kflash/ui/screens/dashboard.py:_row_cells`, ~line 793) — nothing tells the user it's in the bootloader and ready for its first flash. And for CAN devices, "connected" actually means "canbus_uuid present in Moonraker's printer.cfg map" (`build_dashboard_devices`, ~line 339), so a first-flash CAN node that isn't in printer.cfg yet shows a misleading `offline`.
@@ -620,8 +640,8 @@ Full verification matrix (Pi run is mandatory here — this PR is UI). Final who
 
 ## Sequencing summary for the orchestrator
 
-1. **PR-1** (`fix/flash-all-seeded-gate`) — start immediately off `main`. Highest priority.
-2. **PR-2** (`feat/first-flash-ux`) — off `main`, independent; can start after PR-1 is opened (do not develop two PRs' worktrees simultaneously with the same implementer; sequential is fine and simpler).
-3. **PR-3** (`feat/dashboard-bootloader-status`) — only after PR #3 (`fix/katapult-first-flash`) is merged to `main`; rebase/branch from updated `main`.
+1. ✅ **PR-1** (shipped on `claude/first-flash-followups-pr1-uvm6rs`, [#4](https://github.com/YanceyA/kflash/pull/4)) — done, off `main`. Highest priority.
+2. ✅ **PR-2** (`feat/first-flash-ux`, [#5](https://github.com/YanceyA/kflash/pull/5)) — done, off `main`, independent.
+3. ⏳ **PR-3** (`feat/dashboard-bootloader-status`) — **remaining.** Start only after PR #3 (`fix/katapult-first-flash`, [#3](https://github.com/YanceyA/kflash/pull/3)) is merged to `main`; rebase/branch from updated `main`.
 
 Each PR: subagent-driven-development (implementer → spec review → quality review per task), full verification matrix, final whole-branch review, then push + API-based PR creation. Hardware smoke tests (bare-Katapult HBB flash; CAN behaviors) remain user-gated — offer, never run unprompted.
