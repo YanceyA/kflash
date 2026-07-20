@@ -16,10 +16,11 @@
 |----|--------|--------|----|
 | **PR-1** — Flash All seeded-config gate | ✅ **Done** | `claude/first-flash-followups-pr1-uvm6rs` | [#4](https://github.com/YanceyA/kflash/pull/4) |
 | **PR-2** — First-flash UX (safety gate + prefix-agnostic match + docs) | ✅ **Done** | `feat/first-flash-ux` | [#5](https://github.com/YanceyA/kflash/pull/5) |
-| **PR-3** — Dashboard bootloader / CAN states | ⏳ **Ready to start once its dependency merges** | `feat/dashboard-bootloader-status` (not yet created) | — |
+| **PR-3** — Dashboard bootloader / CAN states | ✅ **Done** | `feat/dashboard-bootloader-status` | [#6](https://github.com/YanceyA/kflash/pull/6) |
 
-- PR-1 and PR-2 are implemented, verified, pushed, and opened. Each was verified with `ruff check` clean, `mypy kflash` clean (only the pre-existing Python-3.9 notice), and the **full pytest suite green including all 12 `tests/ui` snapshots** (the snapshot deps were installed and the UI tests actually run, so the "12 env errors" caveat did not apply). Verification ran in a Linux environment rather than the Windows venv / Pi.
-- **PR-3 is blocked only on its stated dependency:** it imports `discovery.is_katapult_device`, which lands with PR #3 (`fix/katapult-first-flash`, currently open as [#3](https://github.com/YanceyA/kflash/pull/3)). As soon as #3 merges to `main`, PR-3 is ready to start — branch off updated `main`, then follow §PR-3 below unchanged.
+**All three PRs are implemented, verified, pushed, and opened.** Each was verified with `ruff check` clean, `mypy kflash` clean (only the pre-existing Python-3.9 notice), and the **full pytest suite green including all 12 `tests/ui` snapshots** (the snapshot deps were installed and the UI tests actually run, so the "12 env errors" caveat did not apply). Verification ran in a Linux environment rather than the Windows venv / Pi.
+
+- PR-3's dependency, PR #3 (`fix/katapult-first-flash`), merged to `main` first; PR-3 then branched off updated `main` and follows §PR-3 below. Its dashboard-snapshot baseline is unchanged (no snapshot scenario includes a katapult-prefixed or unconfigured-CAN device).
 - Note: PR-1 shipped on branch `claude/first-flash-followups-pr1-uvm6rs` rather than the `fix/flash-all-seeded-gate` name suggested below; the code and behavior match §PR-1 exactly.
 
 ---
@@ -464,7 +465,7 @@ Full verification matrix, final whole-branch review, push, open PR:
 
 # PR-3: Dashboard — surface bootloader state and CAN "not in printer.cfg"
 
-> ⏳ **Ready to start once its dependency merges.** Not started — it imports `discovery.is_katapult_device` from PR #3 (`fix/katapult-first-flash`, open as [#3](https://github.com/YanceyA/kflash/pull/3)), which is not yet on `main`. Once #3 merges, branch off updated `main` and follow this section unchanged.
+> ✅ **Done** — shipped on `feat/dashboard-bootloader-status`, opened as [#6](https://github.com/YanceyA/kflash/pull/6). Its dependency (PR #3, `fix/katapult-first-flash`) merged to `main` first, providing `discovery.is_katapult_device`.
 
 **Branch:** `feat/dashboard-bootloader-status` (off `main` **after PR #3 `fix/katapult-first-flash` is merged** — this PR imports `discovery.is_katapult_device` from it. Verify with `git log main --oneline | head` that commit "fix(flash): flash directly when target is already in Katapult bootloader" is present before starting.)
 
@@ -642,6 +643,6 @@ Full verification matrix (Pi run is mandatory here — this PR is UI). Final who
 
 1. ✅ **PR-1** (shipped on `claude/first-flash-followups-pr1-uvm6rs`, [#4](https://github.com/YanceyA/kflash/pull/4)) — done, off `main`. Highest priority.
 2. ✅ **PR-2** (`feat/first-flash-ux`, [#5](https://github.com/YanceyA/kflash/pull/5)) — done, off `main`, independent.
-3. ⏳ **PR-3** (`feat/dashboard-bootloader-status`) — **remaining.** Start only after PR #3 (`fix/katapult-first-flash`, [#3](https://github.com/YanceyA/kflash/pull/3)) is merged to `main`; rebase/branch from updated `main`.
+3. ✅ **PR-3** (`feat/dashboard-bootloader-status`, [#6](https://github.com/YanceyA/kflash/pull/6)) — done, branched off updated `main` after its dependency (PR #3, `fix/katapult-first-flash`) merged.
 
 Each PR: subagent-driven-development (implementer → spec review → quality review per task), full verification matrix, final whole-branch review, then push + API-based PR creation. Hardware smoke tests (bare-Katapult HBB flash; CAN behaviors) remain user-gated — offer, never run unprompted.
