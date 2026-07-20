@@ -46,6 +46,7 @@ from ...commands import cmd_flash, cmd_flash_all, cmd_remove_device
 from ...discovery import (
     extract_mcu_from_serial,
     get_can_interfaces,
+    is_katapult_device,
     is_supported_device,
     match_devices,
     scan_can_devices,
@@ -209,6 +210,8 @@ class DeviceRow:
     role: Optional[str] = None  # toolhead | bridge | None
     has_config: bool = False  # a cached .config exists
     seed_source: Optional[str] = None  # seed label while unreviewed, else None
+    in_bootloader: bool = False  # USB rows: live filename is usb-katapult_*
+    can_not_in_config: bool = False  # CAN rows: reachable map lacks this UUID
 
     @property
     def can_flash(self) -> bool:
@@ -309,6 +312,7 @@ def build_dashboard_devices(
         for device in matches:
             matched_filenames.add(device.filename)
         connected = len(matches) > 0
+        in_bootloader = connected and is_katapult_device(matches[0].filename)
         serial = matches[0].filename if matches else (entry.serial_pattern or "")
         has_config, seed = _lookup_config_state(entry, data)
         row = DeviceRow(
@@ -329,6 +333,7 @@ def build_dashboard_devices(
             role=entry.role,
             has_config=has_config,
             seed_source=seed,
+            in_bootloader=in_bootloader,
         )
         (registered_connected if connected else registered_disconnected).append(row)
 
@@ -338,8 +343,10 @@ def build_dashboard_devices(
             continue
         if can_status_map is not None:
             connected = entry.canbus_uuid in can_status_map
+            can_not_in_config = not connected
         else:
             connected = True  # Moonraker unreachable: graceful default
+            can_not_in_config = False
         has_config, seed = _lookup_config_state(entry, data)
         row = DeviceRow(
             number=0,
@@ -363,6 +370,7 @@ def build_dashboard_devices(
             seed_source=seed,
             canbus_uuid=entry.canbus_uuid,
             canbus_interface=entry.canbus_interface,
+            can_not_in_config=can_not_in_config,
         )
         (registered_connected if connected else registered_disconnected).append(row)
 
@@ -817,9 +825,14 @@ class DashboardScreen(Screen[None]):
         if row.group == "new":
             conn = cell("new", COLORS["orange"])
         elif not row.connected:
-            conn = cell("offline", COLORS["subtle"])
+            if row.can_not_in_config:
+                conn = cell("no cfg", COLORS["orange"])
+            else:
+                conn = cell("offline", COLORS["subtle"])
         elif not row.flashable:
             conn = cell("excluded", COLORS["orange"])
+        elif row.in_bootloader:
+            conn = cell("katapult", COLORS["orange"])
         else:
             conn = cell("connected", COLORS["green"])
 

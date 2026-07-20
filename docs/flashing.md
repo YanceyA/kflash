@@ -88,7 +88,7 @@ sudo ip link set can0 txqueuelen 1024
 
 Device roles (`toolhead`, `bridge`) are set during device registration or via Config Device.
 
-**CAN settings** (in Settings menu):
+**Dashboard CAN status:** a CAN node's `connected` state on the dashboard reflects whether its `canbus_uuid` is present in `printer.cfg` (read via Moonraker), not raw bus presence. A registered node that Moonraker can reach but that isn't in `printer.cfg` yet — e.g. a board awaiting its first flash — shows `no cfg` and is left out of Flash All (which only batches connected devices). Single-device flash (`F`) still works for it.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
