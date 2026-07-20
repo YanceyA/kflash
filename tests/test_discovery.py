@@ -233,3 +233,22 @@ def test_parse_can_query_output_multiple():
 @pytest.mark.parametrize("out", ["", "no matches here", "Detected UUID: ZZZ, Application: X"])
 def test_parse_can_query_output_no_matches(out):
     assert d.parse_can_query_output(out) == []
+
+
+# ---------------------------------------------------------------------------
+# is_katapult_device
+# ---------------------------------------------------------------------------
+
+
+def test_is_katapult_device_true_for_katapult_prefix():
+    assert d.is_katapult_device("usb-katapult_rp2040_45474E621A858C5A-if00")
+
+
+def test_is_katapult_device_case_insensitive():
+    assert d.is_katapult_device("usb-Katapult_rp2040_ABC123-if00")
+
+
+def test_is_katapult_device_false_for_klipper_and_foreign_devices():
+    assert not d.is_katapult_device("usb-Klipper_rp2040_ABC123-if00")
+    assert not d.is_katapult_device("usb-Beacon_Beacon_RevH_FC2-if00")
+    assert not d.is_katapult_device("")

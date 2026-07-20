@@ -59,6 +59,11 @@ def is_supported_device(filename: str) -> bool:
     return any(lower.startswith(prefix) for prefix in SUPPORTED_PREFIXES)
 
 
+def is_katapult_device(filename: str) -> bool:
+    """Return True if filename is a device presenting the Katapult bootloader."""
+    return filename.lower().startswith("usb-katapult_")
+
+
 def match_device(pattern: str, devices: list) -> Optional[DiscoveredDevice]:
     """Find first device whose filename matches a glob pattern."""
     matches = match_devices(pattern, devices)
