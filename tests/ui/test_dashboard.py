@@ -1417,6 +1417,91 @@ def test_a_opens_add_device_and_c_opens_settings(tmp_path) -> None:
     _run(go())
 
 
+# ---------------------------------------------------------------------------
+# Bootloader-mode ('katapult') and CAN not-in-printer.cfg ('no cfg') Conn states
+# ---------------------------------------------------------------------------
+
+
+def test_bootloader_mode_device_row_flagged_and_labeled(tmp_path, monkeypatch) -> None:
+    """A registered device currently enumerated as usb-katapult_* is connected
+    but flagged in_bootloader, and its Conn cell renders 'katapult'."""
+    registry = _write_registry(tmp_path)
+    monkeypatch.setattr(
+        dash,
+        "scan_serial_devices",
+        lambda: [
+            DiscoveredDevice(
+                path="/dev/serial/by-id/usb-katapult_stm32h723xx_ABC123-if00",
+                filename="usb-katapult_stm32h723xx_ABC123-if00",
+            )
+        ],
+    )
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            octopus = next(r for r in screen._rows if r.key == "octopus")
+            assert octopus.connected is True
+            assert octopus.in_bootloader is True
+            cells = screen._row_cells(octopus, None)
+            assert str(cells[3]) == "katapult"
+
+    _run(go())
+
+
+def test_klipper_mode_device_row_not_flagged(tmp_path) -> None:
+    """The default scan enumerates octopus as usb-Klipper_* -- not in the
+    bootloader, so in_bootloader is False and the Conn cell stays 'connected'."""
+    registry = _write_registry(tmp_path)
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            octopus = next(r for r in screen._rows if r.key == "octopus")
+            assert octopus.in_bootloader is False
+            cells = screen._row_cells(octopus, None)
+            assert str(cells[3]) == "connected"
+
+    _run(go())
+
+
+def test_can_device_not_in_printer_cfg_shows_no_cfg(tmp_path, monkeypatch) -> None:
+    """A registered CAN node absent from Moonraker's (reachable) UUID map is
+    connected=False + can_not_in_config, and its Conn cell renders 'no cfg'."""
+    reg = json.loads(json.dumps(_REGISTRY))
+    reg["devices"]["nhk"] = {
+        "name": "Nitehawk", "mcu": "rp2040", "serial_pattern": None,
+        "bootloader_method": "can", "flash_command": "katapult_can",
+        "canbus_uuid": "aabbccddeeff", "canbus_interface": "can0",
+        "flashable": True,
+    }
+    path = tmp_path / "devices.json"
+    path.write_text(json.dumps(reg), encoding="utf-8")
+    registry = Registry(str(path))
+    # Moonraker reachable, but this UUID is not in printer.cfg.
+    monkeypatch.setattr(dash, "get_mcu_canbus_map", lambda: {"otheruuid0000": "mcu x"})
+
+    async def go() -> None:
+        app = KflashApp(registry)
+        async with app.run_test(size=_SIZE) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app._dashboard
+            nhk = next(r for r in screen._rows if r.key == "nhk")
+            assert nhk.connected is False
+            assert nhk.can_not_in_config is True
+            cells = screen._row_cells(nhk, None)
+            assert str(cells[3]) == "no cfg"
+
+    _run(go())
+
+
 def test_dashboard_snapshot(tmp_path, snap_compare) -> None:
     """Deterministic snapshot of the populated dashboard."""
     registry = _write_registry(tmp_path)
