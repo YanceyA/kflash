@@ -13,7 +13,7 @@ Single-device flash (`F`) runs four phases:
 
 If the target already presents as `usb-katapult_*` (Katapult installed but no Klipper app yet — first flash, or a previously aborted flash), step 4 skips bootloader entry and flashes directly. Applies to the `usb`/`serial`/`manual` methods, not UF2 Copy (which needs BOOTSEL mode).
 
-**Flash All** (`B`) builds and flashes all connected, flashable devices that have a cached `.config`. Devices are flashed in role-based order for CAN safety (see [CAN Bus Support](#can-bus-support)).
+**Flash All** (`B`) builds and flashes all connected, flashable devices that have a cached `.config`. Devices are flashed in role-based order for CAN safety (see [CAN Bus Support](#can-bus-support)). Devices whose config was auto-seeded but never reviewed in `menuconfig` are skipped (Flash All can't run `menuconfig`); review one via `M` or flash it individually first.
 
 ## Safety Checks
 
