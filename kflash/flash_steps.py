@@ -37,7 +37,7 @@ from .errors import ERROR_TEMPLATES, ConfigError
 from .events import Emitter
 from .flasher import TIMEOUT_CAN_FLASH, TIMEOUT_FLASH, execute_flash
 from .models import DeviceEntry, GlobalConfig
-from .moonraker import detect_firmware_flavor, get_print_status
+from .moonraker import detect_firmware_flavor, get_klippy_state, get_print_status
 from .safety import should_block_on_printer_state
 
 
@@ -72,6 +72,27 @@ def moonraker_safety_gate(
     print_status = get_print_status()
 
     if print_status is None:
+        klippy_state = get_klippy_state()
+        if klippy_state is not None:
+            # Moonraker is up; Klippy just isn't ready. No print can be
+            # running in this state, so the default flips to proceed --
+            # this is the normal state when a board referenced in
+            # printer.cfg is awaiting its first flash.
+            em.warn(
+                f"Klipper reports state '{klippy_state}' - print status and"
+                " version check unavailable (normal if a board is awaiting"
+                " its first flash)"
+            )
+            if not decider.confirm(
+                ConfirmDecision(
+                    id="klippy_not_ready",
+                    message="Continue with flash?",
+                    default=True,
+                )
+            ):
+                em.phase(label, "Cancelled")
+                return SafetyGate.CANCELLED
+            return SafetyGate.PROCEED
         em.warn("Moonraker unreachable - print status and version check unavailable")
         if not decider.confirm(
             ConfirmDecision(

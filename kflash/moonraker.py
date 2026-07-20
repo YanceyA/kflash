@@ -21,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from . import runner
+from .discovery import prefix_variants
 from .models import PrintStatus
 
 # Connection settings (hardcoded per CONTEXT.md: no custom URL support)
@@ -62,6 +63,24 @@ def get_print_status() -> Optional[PrintStatus]:
             filename=print_stats.get("filename") or None,
             progress=virtual_sdcard.get("progress", 0.0),
         )
+    except (URLError, HTTPError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
+        return None
+
+
+def get_klippy_state() -> Optional[str]:
+    """Query Moonraker for the Klippy host state.
+
+    Returns "ready"/"startup"/"shutdown"/"error"/"disconnected", or None if
+    Moonraker itself is unreachable. Distinguishes "Moonraker down" from
+    "Moonraker up but Klippy not ready" (e.g. a board awaiting its first
+    flash referenced in printer.cfg).
+    """
+    try:
+        url = f"{MOONRAKER_URL}/server/info"
+        with urlopen(url, timeout=TIMEOUT) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        state = data["result"].get("klippy_state")
+        return str(state) if state else None
     except (URLError, HTTPError, json.JSONDecodeError, KeyError, TimeoutError, OSError):
         return None
 
@@ -254,12 +273,13 @@ def match_serial_to_mcu_name(pattern: str, mcu_serials: dict[str, Optional[str]]
     Returns:
         The matching MCU object name, or None if no match.
     """
+    variants = prefix_variants(pattern)
     for mcu_name, serial_path in mcu_serials.items():
         if not serial_path:
             continue
         # Extract filename from path
         filename = serial_path.rsplit("/", 1)[-1] if "/" in serial_path else serial_path
-        if fnmatch.fnmatchcase(filename, pattern):
+        if any(fnmatch.fnmatchcase(filename, v) for v in variants):
             return mcu_name
     return None
 

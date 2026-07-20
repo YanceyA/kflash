@@ -8,6 +8,9 @@ matching, and ``get_mcu_version_for_device`` with an injected versions dict.
 
 from __future__ import annotations
 
+import json
+from urllib.error import URLError
+
 import pytest
 
 from kflash import moonraker as m
@@ -144,6 +147,36 @@ def test_detect_firmware_flavor(version, expected):
 
 
 # ---------------------------------------------------------------------------
+# get_klippy_state — server/info query
+# ---------------------------------------------------------------------------
+
+
+def test_get_klippy_state_parses_server_info(monkeypatch):
+    payload = json.dumps({"result": {"klippy_state": "startup"}}).encode()
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return payload
+
+    monkeypatch.setattr(m, "urlopen", lambda url, timeout: _Resp())
+    assert m.get_klippy_state() == "startup"
+
+
+def test_get_klippy_state_none_when_unreachable(monkeypatch):
+    def _raise(url, timeout):
+        raise URLError("down")
+
+    monkeypatch.setattr(m, "urlopen", _raise)
+    assert m.get_klippy_state() is None
+
+
+# ---------------------------------------------------------------------------
 # match_serial_to_mcu_name
 # ---------------------------------------------------------------------------
 
@@ -165,6 +198,28 @@ def test_match_serial_to_mcu_name_skips_none_serial():
 def test_match_serial_to_mcu_name_no_match():
     mcu_serials = {"mcu": "/dev/serial/by-id/usb-Klipper_rp2040_ABC-if00"}
     assert m.match_serial_to_mcu_name("usb-Klipper_stm32h723*", mcu_serials) is None
+
+
+def test_match_serial_to_mcu_name_matches_across_prefixes():
+    # Device registered while in Katapult mode: pattern has the katapult
+    # prefix, printer.cfg records the Klipper serial path.
+    mcu_serials = {
+        "mcu": "/dev/serial/by-id/usb-Klipper_rp2040_45474E621A858C5A-if00",
+    }
+    assert (
+        m.match_serial_to_mcu_name("usb-katapult_rp2040_45474E621A858C5A*", mcu_serials)
+        == "mcu"
+    )
+
+
+def test_match_serial_to_mcu_name_reverse_prefix_direction():
+    mcu_serials = {
+        "mcu hbb": "/dev/serial/by-id/usb-katapult_rp2040_ABC-if00",
+    }
+    assert (
+        m.match_serial_to_mcu_name("usb-Klipper_rp2040_ABC*", mcu_serials)
+        == "mcu hbb"
+    )
 
 
 # ---------------------------------------------------------------------------
